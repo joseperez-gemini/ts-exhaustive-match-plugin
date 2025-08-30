@@ -257,6 +257,8 @@ export function init(modules: {
 
       // Find the best position to insert the code
       let insertPosition = identifier.end
+      let replaceLength = 0
+      let needsNewline = false
       let currentNode: ts.Node = identifier
 
       // If we're in a variable declaration, insert after the statement
@@ -275,9 +277,10 @@ export function init(modules: {
           insertPosition = currentNode.parent.parent.parent.end
           break
         }
-        // For standalone identifiers, insert after the current line
+        // For standalone identifiers, replace the entire expression statement
         if (typescript.isExpressionStatement(currentNode.parent)) {
-          insertPosition = currentNode.parent.end
+          insertPosition = currentNode.parent.getStart()
+          replaceLength = currentNode.parent.getWidth()
           break
         }
         // For function parameters, insert at the beginning of the function body
@@ -292,6 +295,14 @@ export function init(modules: {
             if (typescript.isBlock(func.body)) {
               // Insert after the opening brace
               insertPosition = func.body.getStart() + 1
+
+              // Check if function body has content (not just empty {})
+              const bodyText = func.body.getText()
+              const hasContent = bodyText.trim().length > 2 // More than just "{}"
+              if (!hasContent) {
+                // Empty function body {} - add trailing newline
+                needsNewline = true
+              }
             } else {
               // Arrow function with expression body - insert before it
               insertPosition = func.body.getStart()
@@ -302,25 +313,58 @@ export function init(modules: {
         currentNode = currentNode.parent
       }
 
-      // Get indentation from the current line
-      const currentLine =
-        sourceFile.getLineAndCharacterOfPosition(insertPosition)
-      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-      const lineStart = sourceFile.getLineStarts()[currentLine.line]!
-      const _lineEnd =
-        currentLine.line < sourceFile.getLineStarts().length - 1
-          ? sourceFile.getLineStarts()[currentLine.line + 1]
-          : sourceFile.getEnd()
-      const lineText = sourceFile.text.substring(lineStart, insertPosition)
-      const baseIndent = /^(\s*)/.exec(lineText)?.[1] ?? ""
+      // Get proper indentation based on context
+      let baseIndent = ""
+
+      // Check if we're inserting inside a function body
+      let isInsideFunction = false
+      let tempNode = currentNode
+      while (tempNode.parent !== undefined) {
+        if (
+          (typescript.isFunctionDeclaration(tempNode.parent) ||
+            typescript.isFunctionExpression(tempNode.parent) ||
+            typescript.isArrowFunction(tempNode.parent) ||
+            typescript.isMethodDeclaration(tempNode.parent)) &&
+          tempNode.parent.body &&
+          typescript.isBlock(tempNode.parent.body)
+        ) {
+          isInsideFunction = true
+          const funcNode = tempNode.parent
+          const funcLine = sourceFile.getLineAndCharacterOfPosition(
+            funcNode.getStart(),
+          )
+          // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+          const funcLineStart = sourceFile.getLineStarts()[funcLine.line]!
+          const funcLineText = sourceFile.text.substring(
+            funcLineStart,
+            funcNode.getStart(),
+          )
+          const funcIndent = /^(\s*)/.exec(funcLineText)?.[1] ?? ""
+          baseIndent = funcIndent + "  " // Add one level of indentation
+          break
+        }
+        tempNode = tempNode.parent
+      }
+
+      if (!isInsideFunction) {
+        // For other cases, get indentation from current position
+        const currentLine =
+          sourceFile.getLineAndCharacterOfPosition(insertPosition)
+        // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+        const lineStart = sourceFile.getLineStarts()[currentLine.line]!
+        const lineText = sourceFile.text.substring(lineStart, insertPosition)
+        baseIndent = /^(\s*)/.exec(lineText)?.[1] ?? ""
+        if (needsNewline === false) needsNewline = replaceLength === 0
+      }
 
       // Format the generated code with proper indentation
       const formattedText =
-        "\n" +
+        (needsNewline || isInsideFunction ? "\n" : "") +
         newText
           .split("\n")
           .map((line) => (line.length > 0 ? baseIndent + line : ""))
-          .join("\n")
+          .join("\n") +
+        (needsNewline && isInsideFunction ? "\n" : "")
 
       return {
         edits: [
@@ -328,7 +372,7 @@ export function init(modules: {
             fileName,
             textChanges: [
               {
-                span: { start: insertPosition, length: 0 },
+                span: { start: insertPosition, length: replaceLength },
                 newText: formattedText,
               },
             ],
@@ -337,6 +381,96 @@ export function init(modules: {
         renameFilename: undefined,
         renameLocation: undefined,
       }
+    }
+
+    // Override getCompletionsAtPosition to provide exhaustive match completions
+    proxy.getCompletionsAtPosition = (fileName, position, options) => {
+      const prior = info.languageService.getCompletionsAtPosition(
+        fileName,
+        position,
+        options,
+      )
+
+      // Get source file
+      const sourceFile = info.languageService
+        .getProgram()
+        ?.getSourceFile(fileName)
+      if (!sourceFile) return prior
+
+      // Find the token at the current position
+      const token = getTokenAtPosition(sourceFile, position, typescript)
+      if (!token || !typescript.isIdentifier(token)) return prior
+
+      // Get type checker
+      const typeChecker = info.languageService.getProgram()?.getTypeChecker()
+      if (!typeChecker) return prior
+
+      // Get symbol and type for the identifier
+      const symbol = typeChecker.getSymbolAtLocation(token)
+      if (!symbol) return prior
+
+      let type = typeChecker.getTypeOfSymbolAtLocation(symbol, token)
+
+      // For variables, try to get the declared type
+      if (symbol.declarations && symbol.declarations.length > 0) {
+        // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+        const decl = symbol.declarations[0]!
+        if (typescript.isVariableDeclaration(decl) && decl.type) {
+          const declaredType = typeChecker.getTypeFromTypeNode(decl.type)
+          if ((declaredType.flags & typescript.TypeFlags.Union) !== 0) {
+            type = declaredType
+          }
+        } else if (typescript.isParameter(decl) && decl.type) {
+          const declaredType = typeChecker.getTypeFromTypeNode(decl.type)
+          if ((declaredType.flags & typescript.TypeFlags.Union) !== 0) {
+            type = declaredType
+          }
+        }
+      }
+
+      // Check if it's a discriminated union
+      if (!isDiscriminatedUnion(type, typeChecker, typescript)) return prior
+
+      const discriminantProperty = findDiscriminantProperty(
+        type,
+        typeChecker,
+        typescript,
+      )
+      if (discriminantProperty === undefined) return prior
+
+      // Generate exhaustive match completion
+      const variableName = token.text
+      const snippetText = generateExhaustiveMatchSnippet(
+        variableName,
+        type,
+        discriminantProperty,
+        typeChecker,
+        typescript,
+      )
+
+      if (snippetText !== undefined) {
+        const customCompletion = {
+          name: `${variableName} (exhaustive match)`,
+          kind: typescript.ScriptElementKind.unknown,
+          kindModifiers: "",
+          sortText: "0", // High priority
+          insertText: snippetText,
+          isSnippet: true as const,
+        }
+
+        if (prior) {
+          prior.entries = [customCompletion, ...prior.entries]
+        } else {
+          return {
+            isGlobalCompletion: false,
+            isMemberCompletion: false,
+            isNewIdentifierLocation: false,
+            entries: [customCompletion],
+          }
+        }
+      }
+
+      return prior
     }
 
     return proxy
@@ -487,7 +621,9 @@ function generateExhaustiveMatch(
   // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
   const unionType = type as ts.UnionType
   const unionTypes = unionType.types
-  const cases: string[] = []
+
+  // Collect cases with their source positions for ordering
+  const casesWithPositions: { value: string; position: number }[] = []
 
   for (const subType of unionTypes) {
     const discriminantProp = subType.getProperty(discriminantProperty)
@@ -500,10 +636,25 @@ function generateExhaustiveMatch(
 
       if ((discriminantType.flags & typescript.TypeFlags.StringLiteral) !== 0) {
         // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
-        cases.push((discriminantType as ts.StringLiteralType).value)
+        const literalValue = (discriminantType as ts.StringLiteralType).value
+
+        // Try to get source position from the discriminant property's value declaration
+        let sourcePosition = 0
+        if (discriminantProp.valueDeclaration) {
+          sourcePosition = discriminantProp.valueDeclaration.getStart()
+        }
+
+        casesWithPositions.push({
+          value: literalValue,
+          position: sourcePosition,
+        })
       }
     }
   }
+
+  // Sort by source position to maintain declaration order
+  casesWithPositions.sort((a, b) => a.position - b.position)
+  const cases = casesWithPositions.map((c) => c.value)
 
   if (cases.length === 0) return ""
 
@@ -516,6 +667,71 @@ function generateExhaustiveMatch(
     }
     result += `  \n`
   }
+  result += `} else {\n`
+  result += `  ${variableName} satisfies never;\n`
+  result += `}`
+
+  return result
+}
+
+function generateExhaustiveMatchSnippet(
+  variableName: string,
+  type: ts.Type,
+  discriminantProperty: string,
+  typeChecker: ts.TypeChecker,
+  typescript: typeof ts,
+): string | undefined {
+  if ((type.flags & typescript.TypeFlags.Union) === 0) return undefined
+
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+  const unionType = type as ts.UnionType
+  const unionTypes = unionType.types
+
+  // Collect cases with their source positions for ordering
+  const casesWithPositions: { value: string; position: number }[] = []
+
+  for (const subType of unionTypes) {
+    const discriminantProp = subType.getProperty(discriminantProperty)
+    if (discriminantProp) {
+      const discriminantType = typeChecker.getTypeOfSymbolAtLocation(
+        discriminantProp,
+        // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+        discriminantProp.valueDeclaration!,
+      )
+
+      if ((discriminantType.flags & typescript.TypeFlags.StringLiteral) !== 0) {
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+        const literalValue = (discriminantType as ts.StringLiteralType).value
+
+        // Try to get source position from the discriminant property's value declaration
+        let sourcePosition = 0
+        if (discriminantProp.valueDeclaration) {
+          sourcePosition = discriminantProp.valueDeclaration.getStart()
+        }
+
+        casesWithPositions.push({
+          value: literalValue,
+          position: sourcePosition,
+        })
+      }
+    }
+  }
+
+  // Sort by source position to maintain declaration order
+  casesWithPositions.sort((a, b) => a.position - b.position)
+  const cases = casesWithPositions.map((c) => c.value)
+
+  if (cases.length === 0) return undefined
+
+  let result = `if (${variableName}.${discriminantProperty} === "${cases[0]}") {\n`
+  // eslint-disable-next-line no-template-curly-in-string
+  result += "  ${1}\n"
+
+  for (let i = 1; i < cases.length; i++) {
+    result += `} else if (${variableName}.${discriminantProperty} === "${cases[i]}") {\n`
+    result += `  \${${i + 1}}\n`
+  }
+
   result += `} else {\n`
   result += `  ${variableName} satisfies never;\n`
   result += `}`

@@ -1,31 +1,18 @@
 import { init } from "./plugin"
 
 import ts from "typescript"
-import { beforeEach, describe, expect, it } from "vitest"
+import { describe, expect, it } from "vitest"
 
-type TestCase = {
-  name: string
-  code: string
-  expectedRefactor?: boolean
-  expectedCode?: string
-}
+const TEST_FILE_NAME = "test.ts"
 
 describe("TypeScript Exhaustive Match Plugin", () => {
-  let plugin: ts.server.PluginModule
-  let files: Map<string, string>
-  let testFileName: string
-
-  beforeEach(() => {
-    plugin = init({ typescript: ts })
-    files = new Map()
-    testFileName = "test.ts"
-  })
-
   function createLanguageService(code: string): ts.LanguageService {
-    files.set(testFileName, code)
+    const plugin = init({ typescript: ts })
+    const files: Map<string, string> = new Map()
+    files.set(TEST_FILE_NAME, code)
 
     const servicesHost: ts.LanguageServiceHost = {
-      getScriptFileNames: () => [testFileName],
+      getScriptFileNames: () => [TEST_FILE_NAME],
       getScriptVersion: () => "1",
       getScriptSnapshot: (fileName) => {
         const content = files.get(fileName)
@@ -42,13 +29,13 @@ describe("TypeScript Exhaustive Match Plugin", () => {
       getDirectories: () => [],
     }
 
-    const documentRegistry = ts.createDocumentRegistry()
-    const baseService = ts.createLanguageService(servicesHost, documentRegistry)
-
     const pluginCreateInfo: ts.server.PluginCreateInfo = {
       // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
       project: {} as ts.server.Project,
-      languageService: baseService,
+      languageService: ts.createLanguageService(
+        servicesHost,
+        ts.createDocumentRegistry(),
+      ),
       languageServiceHost: servicesHost,
       // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
       serverHost: {} as ts.server.ServerHost,
@@ -58,241 +45,297 @@ describe("TypeScript Exhaustive Match Plugin", () => {
     return plugin.create(pluginCreateInfo)
   }
 
-  function getCursorPosition(code: string): number {
-    const marker = "/*cursor*/"
-    const position = code.indexOf(marker)
-    if (position === -1) {
-      throw new Error("Cursor marker not found in test code")
-    }
-    return position
+  const CURSOR_MARKER = "/*cursor*/"
+  function processInput(input: string): [code: string, position: number] {
+    const position = input.indexOf(CURSOR_MARKER)
+    if (position === -1) throw new Error("Cursor marker not found in input")
+    return [input.replace(CURSOR_MARKER, ""), position]
   }
 
-  function getCleanCode(code: string): string {
-    return code.replace("/*cursor*/", "")
-  }
-
-  function testRefactor(testCase: TestCase) {
-    const cleanCode = getCleanCode(testCase.code)
-    const cursorPos = getCursorPosition(testCase.code)
-    const enhancedService = createLanguageService(cleanCode)
-
-    // Test if refactor is available
-    const refactors = enhancedService.getApplicableRefactors(
-      testFileName,
-      cursorPos,
-      {},
-      undefined,
-      undefined,
-    )
-
-    const exhaustiveMatchRefactor = refactors.find(
-      (r) => r.name === "Generate exhaustive match",
-    )
-
-    if (testCase.expectedRefactor === false) {
-      expect(exhaustiveMatchRefactor).toBeUndefined()
-      return
-    }
-
-    expect(exhaustiveMatchRefactor).toBeDefined()
-    expect(exhaustiveMatchRefactor?.actions?.length).toBeGreaterThan(0)
-
-    if (testCase.expectedCode !== undefined) {
-      // Test the generated code
-      const edits = enhancedService.getEditsForRefactor(
-        testFileName,
-        {},
-        cursorPos,
-        "Generate exhaustive match",
-        "generateExhaustiveMatch",
-        {},
-      )
-
-      expect(edits).toBeDefined()
-      expect(edits?.edits.length).toBeGreaterThan(0)
-
-      const generatedCode = edits?.edits?.[0]?.textChanges?.[0]?.newText?.trim()
-      expect(generatedCode).toContain(testCase.expectedCode)
-    }
-  }
-
-  const testCases: TestCase[] = [
+  const REFACTOR_BASE_TEST_CASES = [
     {
-      name: "should work with variable declarations",
-      code: `
+      name: "should work with const variable declarations",
+      input: `
 type Test = { tag: "a" } | { tag: "b" };
 const /*cursor*/x: Test = { tag: "a" };
       `,
-      expectedRefactor: true,
-      expectedCode: `if (x.tag === "a") {
-  
+      output: `
+type Test = { tag: "a" } | { tag: "b" };
+const x: Test = { tag: "a" };
+if (x.tag === "a") {
+  \\
 } else if (x.tag === "b") {
-  
+  \\
 } else {
   x satisfies never;
-}`,
+}
+      `,
+    },
+    {
+      name: "should work with let variable declarations",
+      input: `
+type Test = { tag: "a" } | { tag: "b" };
+let /*cursor*/x: Test = { tag: "a" };
+      `,
+      output: `
+type Test = { tag: "a" } | { tag: "b" };
+let x: Test = { tag: "a" };
+if (x.tag === "a") {
+  \\
+} else if (x.tag === "b") {
+  \\
+} else {
+  x satisfies never;
+}
+      `,
     },
     {
       name: "should work with standalone identifiers",
-      code: `
+      input: `
 type Test = { tag: "a" } | { tag: "b" };
 const x: Test = { tag: "a" };
 /*cursor*/x
       `,
-      expectedRefactor: true,
-      expectedCode: `if (x.tag === "a") {
-  
+      output: `
+type Test = { tag: "a" } | { tag: "b" };
+const x: Test = { tag: "a" };
+if (x.tag === "a") {
+  \\
 } else if (x.tag === "b") {
-  
+  \\
 } else {
   x satisfies never;
-}`,
+}
+      `,
     },
     {
       name: "should work with function parameters",
-      code: `
-type Status = { kind: "loading" } | { kind: "success"; data: string } | { kind: "error"; message: string };
-function handleStatus(/*cursor*/status: Status) {}
+      input: `
+type Test = { tag: "a" } | { tag: "b" };
+function handleTest(/*cursor*/x: Test) {}
       `,
-      expectedRefactor: true,
-      expectedCode: `if (status.kind === "loading") {
-  
-} else if (status.kind === "success") {
-  
-} else if (status.kind === "error") {
-  
-} else {
-  status satisfies never;
-}`,
-    },
-    {
-      name: "should work with different discriminant property names",
-      code: `
-type Shape = { type: "circle"; radius: number } | { type: "rectangle"; width: number; height: number };
-const /*cursor*/shape: Shape = { type: "circle", radius: 5 };
+      output: `
+type Test = { tag: "a" } | { tag: "b" };
+function handleTest(x: Test) {
+  if (x.tag === "a") {
+    \\
+  } else if (x.tag === "b") {
+    \\
+  } else {
+    x satisfies never;
+  }
+}
       `,
-      expectedRefactor: true,
-      expectedCode: `if (shape.type === "circle") {
-  
-} else if (shape.type === "rectangle") {
-  
-} else {
-  shape satisfies never;
-}`,
     },
     {
       name: "should work with complex union types",
-      code: `
-type Event = 
-  | { type: "click"; x: number; y: number }
-  | { type: "keydown"; key: string }
-  | { type: "focus" };
-function handleEvent(/*cursor*/event: Event) {}
+      input: `
+type Test = 
+  | { tag: "a"; prop1: number; prop2: number }
+  | { tag: "b"; prop3: string }
+  | { tag: "c" };
+function handleTest(/*cursor*/x: Test) {}
       `,
-      expectedRefactor: true,
-      expectedCode: `if (event.type === "click") {
-  
-} else if (event.type === "keydown") {
-  
-} else if (event.type === "focus") {
-  
-} else {
-  event satisfies never;
-}`,
+      output: `
+type Test = 
+  | { tag: "a"; prop1: number; prop2: number }
+  | { tag: "b"; prop3: string }
+  | { tag: "c" };
+function handleTest(x: Test) {
+  if (x.tag === "a") {
+    \\
+  } else if (x.tag === "b") {
+    \\
+  } else if (x.tag === "c") {
+    \\
+  } else {
+    x satisfies never;
+  }
+}
+      `,
     },
     {
-      name: "should not work with non-discriminated unions",
-      code: `
-type SimpleUnion = string | number;
-const /*cursor*/x: SimpleUnion = "hello";
-      `,
-      expectedRefactor: false,
-    },
-    {
-      name: "should not work with non-union types",
-      code: `
-type Simple = { name: string };
-const /*cursor*/x: Simple = { name: "test" };
-      `,
-      expectedRefactor: false,
-    },
-    {
-      name: "should work with three-way discriminated union",
-      code: `
+      name: "should work with generic union",
+      input: `
 type Result<T, E> = 
   | { tag: "ok"; value: T }
-  | { tag: "err"; error: E }
+  | { tag: "error"; error: E }
   | { tag: "loading" };
 const /*cursor*/result: Result<string, Error> = { tag: "ok", value: "success" };
       `,
-      expectedRefactor: true,
-      expectedCode: `} else {
-  result satisfies never;
-}`,
-    },
-    {
-      name: "should work when cursor is on variable name in declaration",
-      code: `
-type MyType = { tag: "alt-1"; key1: string } | { tag: "alt-2"; key2: number };
-const /*cursor*/x: MyType = { tag: "alt-1", key1: "hello" };
-      `,
-      expectedRefactor: true,
-      expectedCode: `if (x.tag === "alt-1") {
-  
-} else if (x.tag === "alt-2") {
-  
+      output: `
+type Result<T, E> = 
+  | { tag: "ok"; value: T }
+  | { tag: "error"; error: E }
+  | { tag: "loading" };
+const result: Result<string, Error> = { tag: "ok", value: "success" };
+if (result.tag === "ok") {
+  \\
+} else if (result.tag === "error") {
+  \\
+} else if (result.tag === "loading") {
+  \\
 } else {
-  x satisfies never;
-}`,
+  result satisfies never;
+}
+      `,
     },
   ]
 
-  testCases.forEach((testCase) => {
-    it(testCase.name, () => {
-      testRefactor(testCase)
-    })
-  })
+  const ALTERNATIVE_TEST_HANDLING = [
+    {
+      name: "should preserve order of declaration of tags",
+      input: `
+type Test = { tag: "b" } | { tag: "a" };
+const /*cursor*/x: Test = { tag: "a" };
+      `,
+      output: `
+type Test = { tag: "b" } | { tag: "a" };
+const x: Test = { tag: "a" };
+if (x.tag === "b") {
+  \\
+} else if (x.tag === "a") {
+  \\
+} else {
+  x satisfies never;
+}
+      `,
+    },
+    {
+      name: "should work with function parameters with already opened braces",
+      input: `
+type Test = { tag: "a" } | { tag: "b" };
+function handleTest(/*cursor*/x: Test) {
+}
+      `,
+      output: `
+type Test = { tag: "a" } | { tag: "b" };
+function handleTest(x: Test) {
+  if (x.tag === "a") {
+    \\
+  } else if (x.tag === "b") {
+    \\
+  } else {
+    x satisfies never;
+  }
+}
+      `,
+    },
+    {
+      name: "should work with function parameters with content in the function",
+      input: `
+type Test = { tag: "a" } | { tag: "b" };
+function handleTest(/*cursor*/x: Test) {
+  const something = 0;
+}
+      `,
+      output: `
+type Test = { tag: "a" } | { tag: "b" };
+function handleTest(x: Test) {
+  if (x.tag === "a") {
+    \\
+  } else if (x.tag === "b") {
+    \\
+  } else {
+    x satisfies never;
+  }
+  const something = 0;
+}
+      `,
+    },
+  ]
 
-  describe("Edge cases", () => {
-    it("should handle unions with no common discriminant", () => {
-      const code = `
+  for (const { name, input, output } of [
+    ...REFACTOR_BASE_TEST_CASES,
+    ...ALTERNATIVE_TEST_HANDLING,
+  ]) {
+    it(name, () => {
+      const [inputCode, cursorPosition] = processInput(input)
+      const expectedCode = output.replace(/ \\\n/g, " \n")
+
+      const enhancedService = createLanguageService(inputCode)
+      const refactors = enhancedService.getApplicableRefactors(
+        TEST_FILE_NAME,
+        cursorPosition,
+        {},
+        undefined,
+        undefined,
+      )
+
+      const exhaustiveMatchRefactor = refactors.find(
+        (r) => r.name === "Generate exhaustive match",
+      )
+      expect(exhaustiveMatchRefactor).toBeDefined()
+
+      // Apply the refactor
+      const edits = enhancedService.getEditsForRefactor(
+        TEST_FILE_NAME,
+        {},
+        cursorPosition,
+        "Generate exhaustive match",
+        "generateExhaustiveMatch",
+        {},
+      )
+      expect(edits).toBeDefined()
+      expect(edits?.edits).toHaveLength(1)
+
+      // Check that the generated code matches expected
+      const textChange = edits?.edits[0]?.textChanges[0]
+      expect(textChange).toBeDefined()
+
+      // Apply the edit to get the final code
+      let resultCode = inputCode
+      if (textChange) {
+        resultCode =
+          inputCode.slice(0, textChange.span.start) +
+          textChange.newText +
+          inputCode.slice(textChange.span.start + textChange.span.length)
+      }
+
+      // Compare the result with expected code
+      expect(resultCode.trim()).toBe(expectedCode.trim())
+    })
+  }
+
+  const REFACTOR_NEGATIVE_TEST_CASES = [
+    {
+      name: "should not work with non-discriminated unions",
+      input: `
+type SimpleUnion = string | number;
+const /*cursor*/x: SimpleUnion = "hello";
+      `,
+    },
+    {
+      name: "should not work with non-union types",
+      input: `
+type Simple = { name: string };
+const /*cursor*/x: Simple = { name: "test" };
+      `,
+    },
+    {
+      name: "should not work with unions with no common discriminant",
+      input: `
 type Mixed = { a: string } | { b: number };
 const /*cursor*/x: Mixed = { a: "test" };
-      `
-
-      const cleanCode = getCleanCode(code)
-      const cursorPos = getCursorPosition(code)
-      const enhancedService = createLanguageService(cleanCode)
-
-      const refactors = enhancedService.getApplicableRefactors(
-        testFileName,
-        cursorPos,
-        {},
-        undefined,
-        undefined,
-      )
-
-      const exhaustiveMatchRefactor = refactors.find(
-        (r) => r.name === "Generate exhaustive match",
-      )
-      expect(exhaustiveMatchRefactor).toBeUndefined()
-    })
-
-    it("should handle empty unions gracefully", () => {
-      // This is a theoretical case as TypeScript wouldn't allow this,
-      // but we test the plugin's robustness
-      const code = `
+      `,
+    },
+    {
+      name: "should not work with empty unions",
+      input: `
 type Never = never;
 const /*cursor*/x: Never = null as any;
-      `
+      `,
+    },
+  ]
 
-      const cleanCode = getCleanCode(code)
-      const cursorPos = getCursorPosition(code)
-      const enhancedService = createLanguageService(cleanCode)
+  for (const { name, input } of REFACTOR_NEGATIVE_TEST_CASES) {
+    it(name, () => {
+      const [inputCode, cursorPosition] = processInput(input)
+      const enhancedService = createLanguageService(inputCode)
 
       const refactors = enhancedService.getApplicableRefactors(
-        testFileName,
-        cursorPos,
+        TEST_FILE_NAME,
+        cursorPosition,
         {},
         undefined,
         undefined,
@@ -303,5 +346,73 @@ const /*cursor*/x: Never = null as any;
       )
       expect(exhaustiveMatchRefactor).toBeUndefined()
     })
-  })
+  }
+
+  const COMPLETION_TEST_CASES = [
+    {
+      name: "should provide exhaustive match completion when typing identifier",
+      input: `
+type Test = { tag: "a" } | { tag: "b" };
+const x: Test = { tag: "a" };
+x/*cursor*/
+      `,
+      completion: `
+if (x.tag === "a") {
+  \${1}
+} else if (x.tag === "b") {
+  \${2}
+} else {
+  x satisfies never;
+}
+      `,
+      output: `
+type Test = { tag: "a" } | { tag: "b" };
+const x: Test = { tag: "a" };
+if (x.tag === "a") {
+  \\
+} else if (x.tag === "b") {
+  \\
+} else {
+  x satisfies never;
+}
+      `,
+    },
+  ]
+
+  for (const { name, input, completion, output } of COMPLETION_TEST_CASES) {
+    it(name, () => {
+      const [inputCode, cursorPosition] = processInput(input)
+      const enhancedService = createLanguageService(inputCode)
+      const completions = enhancedService.getCompletionsAtPosition(
+        TEST_FILE_NAME,
+        cursorPosition,
+        {},
+      )
+      expect(completions).toBeDefined()
+      const exhaustiveCompletion = completions?.entries.find((entry) =>
+        entry.name.includes("exhaustive match"),
+      )
+      expect(exhaustiveCompletion).toBeDefined()
+      expect(exhaustiveCompletion?.isSnippet).toBe(true)
+      expect(exhaustiveCompletion?.insertText?.trim()).toBe(completion.trim())
+
+      // Test that the completion correctly replaces the identifier
+      if (exhaustiveCompletion?.replacementSpan) {
+        const replacementStart = exhaustiveCompletion.replacementSpan.start
+        const replacementLength = exhaustiveCompletion.replacementSpan.length
+        const snippetWithoutTabStops = completion.replace(
+          /\\\$\{\\d+\}/g,
+          "\\\\",
+        )
+
+        const resultCode =
+          inputCode.slice(0, replacementStart) +
+          snippetWithoutTabStops.trim() +
+          inputCode.slice(replacementStart + replacementLength)
+
+        const expectedCode = output.replace(/ \\\\\n/g, " \n")
+        expect(resultCode.trim()).toBe(expectedCode.trim())
+      }
+    })
+  }
 })
