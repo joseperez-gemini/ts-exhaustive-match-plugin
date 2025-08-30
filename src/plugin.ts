@@ -399,17 +399,77 @@ export function init(modules: {
 
       // Find the token at the current position
       const token = getTokenAtPosition(sourceFile, position, typescript)
-      if (!token || !typescript.isIdentifier(token)) return prior
 
       // Get type checker
       const typeChecker = info.languageService.getProgram()?.getTypeChecker()
       if (!typeChecker) return prior
 
-      // Get symbol and type for the identifier
-      const symbol = typeChecker.getSymbolAtLocation(token)
-      if (!symbol) return prior
+      let variableToken: ts.Identifier | undefined
+      let symbol: ts.Symbol | undefined
+      let discriminantPrefix: string | undefined
 
-      let type = typeChecker.getTypeOfSymbolAtLocation(symbol, token)
+      // Check for standalone identifier (e.g., "x")
+      if (token && typescript.isIdentifier(token)) {
+        // Check if this identifier is part of a property access
+        if (
+          token.parent !== undefined &&
+          typescript.isPropertyAccessExpression(token.parent)
+        ) {
+          // This is "x" in "x.something"
+          if (token.parent.expression === token) {
+            variableToken = token
+            symbol = typeChecker.getSymbolAtLocation(token)
+          }
+          // This is "something" in "x.something"
+          else if (
+            token.parent.name === token &&
+            typescript.isIdentifier(token.parent.expression)
+          ) {
+            variableToken = token.parent.expression
+            symbol = typeChecker.getSymbolAtLocation(variableToken)
+            discriminantPrefix = token.text
+          }
+        } else {
+          // Regular standalone identifier
+          variableToken = token
+          symbol = typeChecker.getSymbolAtLocation(token)
+        }
+      }
+      // Check for scenarios where cursor is right after dot (e.g., "x.|")
+      else {
+        // Look backwards for a dot token
+        let searchPos = position - 1
+        while (searchPos > 0) {
+          const charAtPos = sourceFile.text.charAt(searchPos)
+          if (charAtPos === ".") {
+            // Found a dot, now find the property access expression
+            const dotToken = getTokenAtPosition(
+              sourceFile,
+              searchPos,
+              typescript,
+            )
+            if (dotToken && dotToken.kind === typescript.SyntaxKind.DotToken) {
+              const propAccess = dotToken.parent
+              if (
+                typescript.isPropertyAccessExpression(propAccess) &&
+                typescript.isIdentifier(propAccess.expression)
+              ) {
+                variableToken = propAccess.expression
+                symbol = typeChecker.getSymbolAtLocation(variableToken)
+                break
+              }
+            }
+          } else if (!/\s/.test(charAtPos)) {
+            // Hit non-whitespace that's not a dot, stop searching
+            break
+          }
+          searchPos--
+        }
+      }
+
+      if (!variableToken || !symbol) return prior
+
+      let type = typeChecker.getTypeOfSymbolAtLocation(symbol, variableToken)
 
       // For variables, try to get the declared type
       if (symbol.declarations && symbol.declarations.length > 0) {
@@ -438,8 +498,15 @@ export function init(modules: {
       )
       if (discriminantProperty === undefined) return prior
 
+      // If we have a discriminant prefix, check if it matches the discriminant property
+      if (discriminantPrefix !== undefined) {
+        if (!discriminantProperty.startsWith(discriminantPrefix)) {
+          return prior
+        }
+      }
+
       // Generate exhaustive match completion
-      const variableName = token.text
+      const variableName = variableToken.text
       const snippetText = generateExhaustiveMatchSnippet(
         variableName,
         type,
@@ -449,6 +516,23 @@ export function init(modules: {
       )
 
       if (snippetText !== undefined) {
+        // Calculate replacement span based on the scenario
+        let replacementSpan: { start: number; length: number }
+
+        if (discriminantPrefix !== undefined) {
+          // For "x.t" scenarios, replace from the variable start to the cursor position
+          replacementSpan = {
+            start: variableToken.getStart(sourceFile),
+            length: position - variableToken.getStart(sourceFile),
+          }
+        } else {
+          // For "x." or "x" scenarios, replace from variable start to cursor position
+          replacementSpan = {
+            start: variableToken.getStart(sourceFile),
+            length: position - variableToken.getStart(sourceFile),
+          }
+        }
+
         const customCompletion = {
           name: `${variableName} (exhaustive match)`,
           kind: typescript.ScriptElementKind.unknown,
@@ -456,6 +540,7 @@ export function init(modules: {
           sortText: "0", // High priority
           insertText: snippetText,
           isSnippet: true as const,
+          replacementSpan,
         }
 
         if (prior) {

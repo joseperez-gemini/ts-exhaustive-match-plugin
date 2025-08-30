@@ -377,6 +377,81 @@ if (x.tag === "a") {
 }
       `,
     },
+    {
+      name: "should provide exhaustive match completion when typing property access",
+      input: `
+type Test = { tag: "a" } | { tag: "b" };
+const x: Test = { tag: "a" };
+x./*cursor*/
+      `,
+      completion: `
+if (x.tag === "a") {
+  \${1}
+} else if (x.tag === "b") {
+  \${2}
+} else {
+  x satisfies never;
+}
+      `,
+      output: `
+type Test = { tag: "a" } | { tag: "b" };
+const x: Test = { tag: "a" };
+if (x.tag === "a") {
+  \\
+} else if (x.tag === "b") {
+  \\
+} else {
+  x satisfies never;
+}
+      `,
+    },
+    {
+      name: "should provide exhaustive match completion when typing discriminant prefix",
+      input: `
+type Test = { tag: "a" } | { tag: "b" };
+const x: Test = { tag: "a" };
+x.t/*cursor*/
+      `,
+      completion: `
+if (x.tag === "a") {
+  \${1}
+} else if (x.tag === "b") {
+  \${2}
+} else {
+  x satisfies never;
+}
+      `,
+      output: `
+type Test = { tag: "a" } | { tag: "b" };
+const x: Test = { tag: "a" };
+if (x.tag === "a") {
+  \\
+} else if (x.tag === "b") {
+  \\
+} else {
+  x satisfies never;
+}
+      `,
+    },
+  ]
+
+  const COMPLETION_NEGATIVE_TEST_CASES = [
+    {
+      name: "should not provide exhaustive match completion for non-discriminant prefix",
+      input: `
+type Test = { tag: "a"; prop: string } | { tag: "b"; prop: string };
+const x: Test = { tag: "a", prop: "test" };
+x.prop/*cursor*/
+      `,
+    },
+    {
+      name: "should not provide exhaustive match completion for unrelated prefix",
+      input: `
+type Test = { tag: "a" } | { tag: "b" };
+const x: Test = { tag: "a" };
+x.foo/*cursor*/
+      `,
+    },
   ]
 
   for (const { name, input, completion, output } of COMPLETION_TEST_CASES) {
@@ -400,10 +475,7 @@ if (x.tag === "a") {
       if (exhaustiveCompletion?.replacementSpan) {
         const replacementStart = exhaustiveCompletion.replacementSpan.start
         const replacementLength = exhaustiveCompletion.replacementSpan.length
-        const snippetWithoutTabStops = completion.replace(
-          /\\\$\{\\d+\}/g,
-          "\\\\",
-        )
+        const snippetWithoutTabStops = completion.replace(/\$\{\d+\}/g, "\\")
 
         const resultCode =
           inputCode.slice(0, replacementStart) +
@@ -413,6 +485,23 @@ if (x.tag === "a") {
         const expectedCode = output.replace(/ \\\\\n/g, " \n")
         expect(resultCode.trim()).toBe(expectedCode.trim())
       }
+    })
+  }
+
+  for (const { name, input } of COMPLETION_NEGATIVE_TEST_CASES) {
+    it(name, () => {
+      const [inputCode, cursorPosition] = processInput(input)
+      const enhancedService = createLanguageService(inputCode)
+      const completions = enhancedService.getCompletionsAtPosition(
+        TEST_FILE_NAME,
+        cursorPosition,
+        {},
+      )
+
+      const exhaustiveCompletion = completions?.entries.find((entry) =>
+        entry.name.includes("exhaustive match"),
+      )
+      expect(exhaustiveCompletion).toBeUndefined()
     })
   }
 })
