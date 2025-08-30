@@ -430,6 +430,23 @@ export function init(modules: {
             discriminantPrefix = token.text
           }
         } else {
+          // Check if we're in an if statement context - if so, only proceed if there's a dot
+          const variableStart = token.getStart(sourceFile)
+          const textBeforeVariable = sourceFile.text.substring(0, variableStart)
+          const ifPattern = /if\s*\(\s*$/
+
+          if (ifPattern.test(textBeforeVariable)) {
+            // We're in an if statement - only proceed if there's property access intention
+            const variableEnd = token.getEnd()
+            const textFromVariable = sourceFile.text.substring(
+              variableEnd,
+              position,
+            )
+            if (!textFromVariable.includes(".")) {
+              return prior // Don't provide completion for plain "if (x"
+            }
+          }
+
           // Regular standalone identifier
           variableToken = token
           symbol = typeChecker.getSymbolAtLocation(token)
@@ -519,7 +536,20 @@ export function init(modules: {
         // Calculate replacement span based on the scenario
         let replacementSpan: { start: number; length: number }
 
-        if (discriminantPrefix !== undefined) {
+        // Check if we're inside an incomplete if statement
+        const ifStatementInfo = findIncompleteIfStatement(
+          sourceFile,
+          variableToken,
+          position,
+        )
+
+        if (ifStatementInfo !== undefined) {
+          // Replace from the start of the if statement to the end of the incomplete expression
+          replacementSpan = {
+            start: ifStatementInfo.start,
+            length: ifStatementInfo.end - ifStatementInfo.start,
+          }
+        } else if (discriminantPrefix !== undefined) {
           // For "x.t" scenarios, replace from the variable start to the cursor position
           replacementSpan = {
             start: variableToken.getStart(sourceFile),
@@ -587,6 +617,54 @@ function getTokenAtPosition(
     return undefined
   }
   return find(sourceFile)
+}
+
+function findIncompleteIfStatement(
+  sourceFile: ts.SourceFile,
+  variableToken: ts.Identifier,
+  cursorPosition: number,
+): { start: number; end: number } | undefined {
+  // Look backwards from the variable token to find "if (" pattern
+  const variableStart = variableToken.getStart(sourceFile)
+  const textBeforeVariable = sourceFile.text.substring(0, variableStart)
+
+  // Look for "if (" pattern before the variable, allowing for whitespace
+  const ifPattern = /if\s*\(\s*$/
+  const match = ifPattern.exec(textBeforeVariable)
+
+  if (match) {
+    // Check if there's a dot after the variable - only handle property access scenarios
+    const variableEnd = variableToken.getEnd()
+    const textFromVariable = sourceFile.text.substring(
+      variableEnd,
+      cursorPosition,
+    )
+
+    // Only proceed if we find a dot (indicating property access intention)
+    if (!textFromVariable.includes(".")) {
+      return undefined
+    }
+
+    const ifStartPosition = textBeforeVariable.length - match[0].length
+
+    // Look forward from cursor to find the end of the incomplete expression
+    // Handle cases like "if (x.|)" or "if (x.|) {}"
+    let endPosition = cursorPosition
+    const textAfterCursor = sourceFile.text.substring(cursorPosition)
+
+    // Look for closing paren and potentially empty braces (including multiline)
+    const closingParenMatch = /^\s*\)(\s*\{[\s\n]*\})?/.exec(textAfterCursor)
+    if (closingParenMatch) {
+      endPosition = cursorPosition + closingParenMatch[0].length
+    }
+
+    return {
+      start: ifStartPosition,
+      end: endPosition,
+    }
+  }
+
+  return undefined
 }
 
 function isDiscriminatedUnion(

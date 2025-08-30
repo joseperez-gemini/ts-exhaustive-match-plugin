@@ -348,7 +348,8 @@ const /*cursor*/x: Never = null as any;
     })
   }
 
-  const COMPLETION_TEST_CASES = [
+  // Base completion test cases - testing core functionality
+  const COMPLETION_BASE_TEST_CASES = [
     {
       name: "should provide exhaustive match completion when typing identifier",
       input: `
@@ -435,6 +436,67 @@ if (x.tag === "a") {
     },
   ]
 
+  // Generate test cases for if statement contexts using both x. and x.t patterns
+
+  const propertyAccessPrefixes = [
+    { cursor: "x./*cursor*/", name: "property access" },
+    { cursor: "x.t/*cursor*/", name: "discriminant prefix" },
+  ]
+
+  const ifStatementContexts = [
+    {
+      template: "if (__CURSOR__",
+      name: "incomplete if statement",
+    },
+    {
+      template: "if (__CURSOR__)",
+      name: "if statement with auto-completed closing paren",
+    },
+    {
+      template: "if (__CURSOR__) {}",
+      name: "if statement with empty braces",
+    },
+    {
+      template: "if (__CURSOR__) {\n}",
+      name: "if statement with multiline empty braces",
+    },
+  ]
+
+  const COMPLETION_IF_STATEMENT_TEST_CASES = []
+  for (const prefix of propertyAccessPrefixes) {
+    for (const context of ifStatementContexts) {
+      const contextInput = context.template.replace("__CURSOR__", prefix.cursor)
+      COMPLETION_IF_STATEMENT_TEST_CASES.push({
+        name: `should provide exhaustive match completion when typing ${prefix.name} in ${context.name}`,
+        input: `
+type Test = { tag: "a" } | { tag: "b" };
+const x: Test = { tag: "a" };
+${contextInput}
+        `,
+        completion: `
+if (x.tag === "a") {
+  \${1}
+} else if (x.tag === "b") {
+  \${2}
+} else {
+  x satisfies never;
+}
+        `,
+        output: `
+type Test = { tag: "a" } | { tag: "b" };
+const x: Test = { tag: "a" };
+if (x.tag === "a") {
+  \\
+} else if (x.tag === "b") {
+  \\
+} else {
+  x satisfies never;
+}
+        `,
+      })
+    }
+  }
+
   const COMPLETION_NEGATIVE_TEST_CASES = [
     {
       name: "should not provide exhaustive match completion for non-discriminant prefix",
@@ -452,6 +514,36 @@ const x: Test = { tag: "a" };
 x.foo/*cursor*/
       `,
     },
+    {
+      name: "should not provide exhaustive match completion for non-discriminated union in if statement",
+      input: `
+type SimpleUnion = string | number;
+const x: SimpleUnion = "hello";
+if (x/*cursor*/
+      `,
+    },
+    {
+      name: "should not provide exhaustive match completion for non-union type in if statement",
+      input: `
+type Simple = { name: string };
+const x: Simple = { name: "test" };
+if (x/*cursor*/
+      `,
+    },
+    {
+      name: "should not provide exhaustive match completion for plain identifier in if statement",
+      input: `
+type Test = { tag: "a" } | { tag: "b" };
+const x: Test = { tag: "a" };
+if (x/*cursor*/
+      `,
+    },
+  ]
+
+  // Combine base cases with generated if statement cases
+  const COMPLETION_TEST_CASES = [
+    ...COMPLETION_BASE_TEST_CASES,
+    ...COMPLETION_IF_STATEMENT_TEST_CASES,
   ]
 
   for (const { name, input, completion, output } of COMPLETION_TEST_CASES) {
