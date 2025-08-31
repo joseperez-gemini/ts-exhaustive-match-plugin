@@ -95,25 +95,8 @@ export function init(modules: {
       const symbol = typeChecker.getSymbolAtLocation(identifier)
       if (!symbol) return prior
 
-      // Get the declared type from the type annotation if available, otherwise use the inferred type
-      let type = typeChecker.getTypeOfSymbolAtLocation(symbol, identifier)
-
-      // For standalone identifiers, try to get the declared type from the variable declaration
-      if (symbol.declarations && symbol.declarations.length > 0) {
-        // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-        const decl = symbol.declarations[0]!
-        if (typescript.isVariableDeclaration(decl) && decl.type) {
-          const declaredType = typeChecker.getTypeFromTypeNode(decl.type)
-          if ((declaredType.flags & typescript.TypeFlags.Union) !== 0) {
-            type = declaredType
-          }
-        } else if (typescript.isParameter(decl) && decl.type) {
-          const declaredType = typeChecker.getTypeFromTypeNode(decl.type)
-          if ((declaredType.flags & typescript.TypeFlags.Union) !== 0) {
-            type = declaredType
-          }
-        }
-      }
+      // Use the narrowed type at the current location for exhaustiveness checking
+      const type = typeChecker.getTypeAtLocation(identifier)
       if (!isDiscriminatedUnion(type, typeChecker, typescript)) return prior
 
       const discriminantProperty = findDiscriminantProperty(
@@ -219,25 +202,8 @@ export function init(modules: {
       const symbol = typeChecker.getSymbolAtLocation(identifier)
       if (!symbol) return undefined
 
-      // Get the declared type from the type annotation if available, otherwise use the inferred type
-      let type = typeChecker.getTypeOfSymbolAtLocation(symbol, identifier)
-
-      // For standalone identifiers, try to get the declared type from the variable declaration
-      if (symbol.declarations && symbol.declarations.length > 0) {
-        // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-        const decl = symbol.declarations[0]!
-        if (typescript.isVariableDeclaration(decl) && decl.type) {
-          const declaredType = typeChecker.getTypeFromTypeNode(decl.type)
-          if ((declaredType.flags & typescript.TypeFlags.Union) !== 0) {
-            type = declaredType
-          }
-        } else if (typescript.isParameter(decl) && decl.type) {
-          const declaredType = typeChecker.getTypeFromTypeNode(decl.type)
-          if ((declaredType.flags & typescript.TypeFlags.Union) !== 0) {
-            type = declaredType
-          }
-        }
-      }
+      // Use the narrowed type at the current location for exhaustiveness checking
+      const type = typeChecker.getTypeAtLocation(identifier)
       if (!isDiscriminatedUnion(type, typeChecker, typescript)) return undefined
 
       const discriminantProperty = findDiscriminantProperty(
@@ -247,12 +213,20 @@ export function init(modules: {
       )
       if (discriminantProperty === undefined) return undefined
 
+      // Get source declaration type for tag ordering
+      const sourceDeclarationType = getSourceDeclarationType(
+        symbol,
+        typeChecker,
+        typescript,
+      )
+
       const newText = generateExhaustiveMatch(
         identifier.text,
         type,
         discriminantProperty,
         typeChecker,
         typescript,
+        sourceDeclarationType,
       )
 
       // Find the best position to insert the code
@@ -486,24 +460,8 @@ export function init(modules: {
 
       if (!variableToken || !symbol) return prior
 
-      let type = typeChecker.getTypeOfSymbolAtLocation(symbol, variableToken)
-
-      // For variables, try to get the declared type
-      if (symbol.declarations && symbol.declarations.length > 0) {
-        // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-        const decl = symbol.declarations[0]!
-        if (typescript.isVariableDeclaration(decl) && decl.type) {
-          const declaredType = typeChecker.getTypeFromTypeNode(decl.type)
-          if ((declaredType.flags & typescript.TypeFlags.Union) !== 0) {
-            type = declaredType
-          }
-        } else if (typescript.isParameter(decl) && decl.type) {
-          const declaredType = typeChecker.getTypeFromTypeNode(decl.type)
-          if ((declaredType.flags & typescript.TypeFlags.Union) !== 0) {
-            type = declaredType
-          }
-        }
-      }
+      // Use the narrowed type at the current location for exhaustiveness checking
+      const type = typeChecker.getTypeAtLocation(variableToken)
 
       // Check if it's a discriminated union
       if (!isDiscriminatedUnion(type, typeChecker, typescript)) return prior
@@ -522,6 +480,13 @@ export function init(modules: {
         }
       }
 
+      // Get source declaration type for tag ordering
+      const sourceDeclarationType = getSourceDeclarationType(
+        symbol,
+        typeChecker,
+        typescript,
+      )
+
       // Generate exhaustive match completion
       const variableName = variableToken.text
       const snippetText = generateExhaustiveMatchSnippet(
@@ -530,6 +495,7 @@ export function init(modules: {
         discriminantProperty,
         typeChecker,
         typescript,
+        sourceDeclarationType,
       )
 
       if (snippetText !== undefined) {
@@ -617,6 +583,30 @@ function getTokenAtPosition(
     return undefined
   }
   return find(sourceFile)
+}
+
+function getSourceDeclarationType(
+  symbol: ts.Symbol,
+  typeChecker: ts.TypeChecker,
+  typescript: typeof ts,
+): ts.Type | undefined {
+  // Get the declared type from source for tag ordering purposes
+  if (symbol.declarations && symbol.declarations.length > 0) {
+    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+    const decl = symbol.declarations[0]!
+    if (typescript.isVariableDeclaration(decl) && decl.type) {
+      const declaredType = typeChecker.getTypeFromTypeNode(decl.type)
+      if ((declaredType.flags & typescript.TypeFlags.Union) !== 0) {
+        return declaredType
+      }
+    } else if (typescript.isParameter(decl) && decl.type) {
+      const declaredType = typeChecker.getTypeFromTypeNode(decl.type)
+      if ((declaredType.flags & typescript.TypeFlags.Union) !== 0) {
+        return declaredType
+      }
+    }
+  }
+  return undefined
 }
 
 function findIncompleteIfStatement(
@@ -778,6 +768,7 @@ function generateExhaustiveMatch(
   discriminantProperty: string,
   typeChecker: ts.TypeChecker,
   typescript: typeof ts,
+  sourceDeclarationType?: ts.Type,
 ): string {
   if ((type.flags & typescript.TypeFlags.Union) === 0) return ""
 
@@ -785,10 +776,18 @@ function generateExhaustiveMatch(
   const unionType = type as ts.UnionType
   const unionTypes = unionType.types
 
+  // Use source declaration type for ordering if available, otherwise use narrowed type
+  const typeForOrdering =
+    sourceDeclarationType &&
+    (sourceDeclarationType.flags & typescript.TypeFlags.Union) !== 0
+      ? // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+        (sourceDeclarationType as ts.UnionType)
+      : unionType
+
   // Collect cases with their source positions for ordering
   const casesWithPositions: { value: string; position: number }[] = []
 
-  for (const subType of unionTypes) {
+  for (const subType of typeForOrdering.types) {
     const discriminantProp = subType.getProperty(discriminantProperty)
     if (discriminantProp) {
       const discriminantType = typeChecker.getTypeOfSymbolAtLocation(
@@ -801,16 +800,44 @@ function generateExhaustiveMatch(
         // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
         const literalValue = (discriminantType as ts.StringLiteralType).value
 
-        // Try to get source position from the discriminant property's value declaration
-        let sourcePosition = 0
-        if (discriminantProp.valueDeclaration) {
-          sourcePosition = discriminantProp.valueDeclaration.getStart()
-        }
-
-        casesWithPositions.push({
-          value: literalValue,
-          position: sourcePosition,
+        // Only include this case if it exists in the narrowed type
+        const existsInNarrowedType = unionTypes.some((narrowedSubType) => {
+          const narrowedDiscriminantProp =
+            narrowedSubType.getProperty(discriminantProperty)
+          if (narrowedDiscriminantProp) {
+            const narrowedDiscriminantType =
+              typeChecker.getTypeOfSymbolAtLocation(
+                narrowedDiscriminantProp,
+                // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+                narrowedDiscriminantProp.valueDeclaration!,
+              )
+            if (
+              (narrowedDiscriminantType.flags &
+                typescript.TypeFlags.StringLiteral) !==
+              0
+            ) {
+              return (
+                // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+                (narrowedDiscriminantType as ts.StringLiteralType).value ===
+                literalValue
+              )
+            }
+          }
+          return false
         })
+
+        if (existsInNarrowedType) {
+          // Try to get source position from the discriminant property's value declaration
+          let sourcePosition = 0
+          if (discriminantProp.valueDeclaration) {
+            sourcePosition = discriminantProp.valueDeclaration.getStart()
+          }
+
+          casesWithPositions.push({
+            value: literalValue,
+            position: sourcePosition,
+          })
+        }
       }
     }
   }
@@ -843,6 +870,7 @@ function generateExhaustiveMatchSnippet(
   discriminantProperty: string,
   typeChecker: ts.TypeChecker,
   typescript: typeof ts,
+  sourceDeclarationType?: ts.Type,
 ): string | undefined {
   if ((type.flags & typescript.TypeFlags.Union) === 0) return undefined
 
@@ -850,10 +878,18 @@ function generateExhaustiveMatchSnippet(
   const unionType = type as ts.UnionType
   const unionTypes = unionType.types
 
+  // Use source declaration type for ordering if available, otherwise use narrowed type
+  const typeForOrdering =
+    sourceDeclarationType &&
+    (sourceDeclarationType.flags & typescript.TypeFlags.Union) !== 0
+      ? // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+        (sourceDeclarationType as ts.UnionType)
+      : unionType
+
   // Collect cases with their source positions for ordering
   const casesWithPositions: { value: string; position: number }[] = []
 
-  for (const subType of unionTypes) {
+  for (const subType of typeForOrdering.types) {
     const discriminantProp = subType.getProperty(discriminantProperty)
     if (discriminantProp) {
       const discriminantType = typeChecker.getTypeOfSymbolAtLocation(
@@ -866,16 +902,44 @@ function generateExhaustiveMatchSnippet(
         // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
         const literalValue = (discriminantType as ts.StringLiteralType).value
 
-        // Try to get source position from the discriminant property's value declaration
-        let sourcePosition = 0
-        if (discriminantProp.valueDeclaration) {
-          sourcePosition = discriminantProp.valueDeclaration.getStart()
-        }
-
-        casesWithPositions.push({
-          value: literalValue,
-          position: sourcePosition,
+        // Only include this case if it exists in the narrowed type
+        const existsInNarrowedType = unionTypes.some((narrowedSubType) => {
+          const narrowedDiscriminantProp =
+            narrowedSubType.getProperty(discriminantProperty)
+          if (narrowedDiscriminantProp) {
+            const narrowedDiscriminantType =
+              typeChecker.getTypeOfSymbolAtLocation(
+                narrowedDiscriminantProp,
+                // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+                narrowedDiscriminantProp.valueDeclaration!,
+              )
+            if (
+              (narrowedDiscriminantType.flags &
+                typescript.TypeFlags.StringLiteral) !==
+              0
+            ) {
+              return (
+                // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+                (narrowedDiscriminantType as ts.StringLiteralType).value ===
+                literalValue
+              )
+            }
+          }
+          return false
         })
+
+        if (existsInNarrowedType) {
+          // Try to get source position from the discriminant property's value declaration
+          let sourcePosition = 0
+          if (discriminantProp.valueDeclaration) {
+            sourcePosition = discriminantProp.valueDeclaration.getStart()
+          }
+
+          casesWithPositions.push({
+            value: literalValue,
+            position: sourcePosition,
+          })
+        }
       }
     }
   }

@@ -57,11 +57,11 @@ describe("TypeScript Exhaustive Match Plugin", () => {
       name: "should work with const variable declarations",
       input: `
 type Test = { tag: "a" } | { tag: "b" };
-const /*cursor*/x: Test = { tag: "a" };
+const /*cursor*/x: Test = {} as Test;
       `,
       output: `
 type Test = { tag: "a" } | { tag: "b" };
-const x: Test = { tag: "a" };
+const x: Test = {} as Test;
 if (x.tag === "a") {
   \\
 } else if (x.tag === "b") {
@@ -75,11 +75,11 @@ if (x.tag === "a") {
       name: "should work with let variable declarations",
       input: `
 type Test = { tag: "a" } | { tag: "b" };
-let /*cursor*/x: Test = { tag: "a" };
+let /*cursor*/x: Test = {} as Test;
       `,
       output: `
 type Test = { tag: "a" } | { tag: "b" };
-let x: Test = { tag: "a" };
+let x: Test = {} as Test;
 if (x.tag === "a") {
   \\
 } else if (x.tag === "b") {
@@ -93,12 +93,12 @@ if (x.tag === "a") {
       name: "should work with standalone identifiers",
       input: `
 type Test = { tag: "a" } | { tag: "b" };
-const x: Test = { tag: "a" };
+const x: Test = {} as Test;
 /*cursor*/x
       `,
       output: `
 type Test = { tag: "a" } | { tag: "b" };
-const x: Test = { tag: "a" };
+const x: Test = {} as Test;
 if (x.tag === "a") {
   \\
 } else if (x.tag === "b") {
@@ -161,14 +161,14 @@ type Result<T, E> =
   | { tag: "ok"; value: T }
   | { tag: "error"; error: E }
   | { tag: "loading" };
-const /*cursor*/result: Result<string, Error> = { tag: "ok", value: "success" };
+const /*cursor*/result: Result<string, Error> = {} as Result<string, Error>;
       `,
       output: `
 type Result<T, E> = 
   | { tag: "ok"; value: T }
   | { tag: "error"; error: E }
   | { tag: "loading" };
-const result: Result<string, Error> = { tag: "ok", value: "success" };
+const result: Result<string, Error> = {} as Result<string, Error>;
 if (result.tag === "ok") {
   \\
 } else if (result.tag === "error") {
@@ -182,16 +182,42 @@ if (result.tag === "ok") {
     },
   ]
 
+  const REFACTOR_NARROWING_TEST_CASES = [
+    {
+      name: "should work with narrowed types after type guard",
+      input: `
+type Test = { tag: "a"; value: number } | { tag: "b"; value: string } | { tag: "c"; value: boolean };
+const x: Test = {} as Test;
+if (x.tag !== "c") {
+  /*cursor*/x
+}
+      `,
+      output: `
+type Test = { tag: "a"; value: number } | { tag: "b"; value: string } | { tag: "c"; value: boolean };
+const x: Test = {} as Test;
+if (x.tag !== "c") {
+  if (x.tag === "a") {
+    \\
+  } else if (x.tag === "b") {
+    \\
+  } else {
+    x satisfies never;
+  }
+}
+      `,
+    },
+  ]
+
   const ALTERNATIVE_TEST_HANDLING = [
     {
       name: "should preserve order of declaration of tags",
       input: `
 type Test = { tag: "b" } | { tag: "a" };
-const /*cursor*/x: Test = { tag: "a" };
+const /*cursor*/x: Test = {} as Test;
       `,
       output: `
 type Test = { tag: "b" } | { tag: "a" };
-const x: Test = { tag: "a" };
+const x: Test = {} as Test;
 if (x.tag === "b") {
   \\
 } else if (x.tag === "a") {
@@ -247,6 +273,7 @@ function handleTest(x: Test) {
 
   for (const { name, input, output } of [
     ...REFACTOR_BASE_TEST_CASES,
+    ...REFACTOR_NARROWING_TEST_CASES,
     ...ALTERNATIVE_TEST_HANDLING,
   ]) {
     it(name, () => {
@@ -302,21 +329,21 @@ function handleTest(x: Test) {
       name: "should not work with non-discriminated unions",
       input: `
 type SimpleUnion = string | number;
-const /*cursor*/x: SimpleUnion = "hello";
+const /*cursor*/x: SimpleUnion = {} as SimpleUnion;
       `,
     },
     {
       name: "should not work with non-union types",
       input: `
 type Simple = { name: string };
-const /*cursor*/x: Simple = { name: "test" };
+const /*cursor*/x: Simple = {} as Simple;
       `,
     },
     {
       name: "should not work with unions with no common discriminant",
       input: `
 type Mixed = { a: string } | { b: number };
-const /*cursor*/x: Mixed = { a: "test" };
+const /*cursor*/x: Mixed = {} as Mixed;
       `,
     },
     {
@@ -354,7 +381,7 @@ const /*cursor*/x: Never = null as any;
       name: "should provide exhaustive match completion when typing identifier",
       input: `
 type Test = { tag: "a" } | { tag: "b" };
-const x: Test = { tag: "a" };
+const x: Test = {} as Test;
 x/*cursor*/
       `,
       completion: `
@@ -368,7 +395,7 @@ if (x.tag === "a") {
       `,
       output: `
 type Test = { tag: "a" } | { tag: "b" };
-const x: Test = { tag: "a" };
+const x: Test = {} as Test;
 if (x.tag === "a") {
   \\
 } else if (x.tag === "b") {
@@ -382,7 +409,7 @@ if (x.tag === "a") {
       name: "should provide exhaustive match completion when typing property access",
       input: `
 type Test = { tag: "a" } | { tag: "b" };
-const x: Test = { tag: "a" };
+const x: Test = {} as Test;
 x./*cursor*/
       `,
       completion: `
@@ -396,7 +423,7 @@ if (x.tag === "a") {
       `,
       output: `
 type Test = { tag: "a" } | { tag: "b" };
-const x: Test = { tag: "a" };
+const x: Test = {} as Test;
 if (x.tag === "a") {
   \\
 } else if (x.tag === "b") {
@@ -410,7 +437,7 @@ if (x.tag === "a") {
       name: "should provide exhaustive match completion when typing discriminant prefix",
       input: `
 type Test = { tag: "a" } | { tag: "b" };
-const x: Test = { tag: "a" };
+const x: Test = {} as Test;
 x.t/*cursor*/
       `,
       completion: `
@@ -424,7 +451,7 @@ if (x.tag === "a") {
       `,
       output: `
 type Test = { tag: "a" } | { tag: "b" };
-const x: Test = { tag: "a" };
+const x: Test = {} as Test;
 if (x.tag === "a") {
   \\
 } else if (x.tag === "b") {
@@ -470,7 +497,7 @@ if (x.tag === "a") {
         name: `should provide exhaustive match completion when typing ${prefix.name} in ${context.name}`,
         input: `
 type Test = { tag: "a" } | { tag: "b" };
-const x: Test = { tag: "a" };
+const x: Test = {} as Test;
 ${contextInput}
         `,
         completion: `
@@ -484,7 +511,7 @@ if (x.tag === "a") {
         `,
         output: `
 type Test = { tag: "a" } | { tag: "b" };
-const x: Test = { tag: "a" };
+const x: Test = {} as Test;
 if (x.tag === "a") {
   \\
 } else if (x.tag === "b") {
@@ -502,7 +529,7 @@ if (x.tag === "a") {
       name: "should not provide exhaustive match completion for non-discriminant prefix",
       input: `
 type Test = { tag: "a"; prop: string } | { tag: "b"; prop: string };
-const x: Test = { tag: "a", prop: "test" };
+const x: Test = {} as Test;
 x.prop/*cursor*/
       `,
     },
@@ -510,7 +537,7 @@ x.prop/*cursor*/
       name: "should not provide exhaustive match completion for unrelated prefix",
       input: `
 type Test = { tag: "a" } | { tag: "b" };
-const x: Test = { tag: "a" };
+const x: Test = {} as Test;
 x.foo/*cursor*/
       `,
     },
@@ -518,7 +545,7 @@ x.foo/*cursor*/
       name: "should not provide exhaustive match completion for non-discriminated union in if statement",
       input: `
 type SimpleUnion = string | number;
-const x: SimpleUnion = "hello";
+const x: SimpleUnion = {} as SimpleUnion;
 if (x/*cursor*/
       `,
     },
@@ -526,7 +553,7 @@ if (x/*cursor*/
       name: "should not provide exhaustive match completion for non-union type in if statement",
       input: `
 type Simple = { name: string };
-const x: Simple = { name: "test" };
+const x: Simple = {} as Simple;
 if (x/*cursor*/
       `,
     },
@@ -534,16 +561,85 @@ if (x/*cursor*/
       name: "should not provide exhaustive match completion for plain identifier in if statement",
       input: `
 type Test = { tag: "a" } | { tag: "b" };
-const x: Test = { tag: "a" };
+const x: Test = {} as Test;
 if (x/*cursor*/
       `,
     },
   ]
 
-  // Combine base cases with generated if statement cases
+  // Type narrowing test cases
+  const COMPLETION_NARROWING_TEST_CASES = [
+    {
+      name: "should work with narrowed types after type guard",
+      input: `
+type Test = { tag: "a"; value: number } | { tag: "b"; value: string } | { tag: "c"; value: boolean };
+const x: Test = {} as Test;
+if (x.tag !== "c") {
+  /*cursor*/x
+}
+      `,
+      completion: `
+if (x.tag === "a") {
+  \${1}
+} else if (x.tag === "b") {
+  \${2}
+} else {
+  x satisfies never;
+}
+      `,
+      output: `
+type Test = { tag: "a"; value: number } | { tag: "b"; value: string } | { tag: "c"; value: boolean };
+const x: Test = {} as Test;
+if (x.tag !== "c") {
+  if (x.tag === "a") {
+    \\
+  } else if (x.tag === "b") {
+    \\
+  } else {
+    x satisfies never;
+  }
+}
+      `,
+    },
+    {
+      name: "should provide narrowed completions when typing property access after type guard",
+      input: `
+type Test = { tag: "a"; value: number } | { tag: "b"; value: string } | { tag: "c"; value: boolean };
+const x: Test = {} as Test;
+if (x.tag !== "c") {
+  x./*cursor*/
+}
+      `,
+      completion: `
+if (x.tag === "a") {
+  \${1}
+} else if (x.tag === "b") {
+  \${2}
+} else {
+  x satisfies never;
+}
+      `,
+      output: `
+type Test = { tag: "a"; value: number } | { tag: "b"; value: string } | { tag: "c"; value: boolean };
+const x: Test = {} as Test;
+if (x.tag !== "c") {
+  if (x.tag === "a") {
+    \\
+  } else if (x.tag === "b") {
+    \\
+  } else {
+    x satisfies never;
+  }
+}
+      `,
+    },
+  ]
+
+  // Combine base cases with generated if statement cases and narrowing cases
   const COMPLETION_TEST_CASES = [
     ...COMPLETION_BASE_TEST_CASES,
     ...COMPLETION_IF_STATEMENT_TEST_CASES,
+    ...COMPLETION_NARROWING_TEST_CASES,
   ]
 
   for (const { name, input, completion, output } of COMPLETION_TEST_CASES) {
@@ -567,14 +663,14 @@ if (x/*cursor*/
       if (exhaustiveCompletion?.replacementSpan) {
         const replacementStart = exhaustiveCompletion.replacementSpan.start
         const replacementLength = exhaustiveCompletion.replacementSpan.length
-        const snippetWithoutTabStops = completion.replace(/\$\{\d+\}/g, "\\")
+        const snippetWithoutTabStops = completion.replace(/\$\{\d+\}/g, "")
 
         const resultCode =
           inputCode.slice(0, replacementStart) +
           snippetWithoutTabStops.trim() +
           inputCode.slice(replacementStart + replacementLength)
 
-        const expectedCode = output.replace(/ \\\\\n/g, " \n")
+        const expectedCode = output.replace(/ \\\n/g, " \n")
         expect(resultCode.trim()).toBe(expectedCode.trim())
       }
     })
