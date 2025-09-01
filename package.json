@@ -21,8 +21,16 @@
     "pattern-matching",
     "exhaustive"
   ],
-  "author": "",
+  "author": "joseperezflix@gmail.com",
   "license": "MIT",
+  "homepage": "https://github.com/joseperez-gemini/ts-exhaustive-match-plugin#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/joseperez-gemini/ts-exhaustive-match-plugin.git"
+  },
+  "bugs": {
+    "url": "https://github.com/joseperez-gemini/ts-exhaustive-match-plugin/issues"
+  },
   "devDependencies": {
     "@eslint/eslintrc": "^3",
     "@eslint/js": "^9.34.0",
