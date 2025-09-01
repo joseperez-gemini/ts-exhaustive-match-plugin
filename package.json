@@ -13,7 +13,8 @@
     "test": "vitest run --coverage --silent=false --disable-console-intercept",
     "test:watch": "vitest",
     "test:ui": "vitest --ui",
-    "check": "npm run format && npm run compile && npm run lint && npm run build && npm run test"
+    "check": "npm run format && npm run compile && npm run lint && npm run build && npm run test",
+    "prepublishOnly": "rm -rf lib && npm run build"
   },
   "keywords": [
     "typescript",
