@@ -29,7 +29,7 @@ export function init(modules: { typescript: TS }): ts.server.PluginModule {
     /* eslint-enable */
     /* v8 ignore stop -- @preserve */
 
-    function getLSContest(fileName: string) {
+    function getLSContext(fileName: string) {
       const sourceFile = info.languageService
         .getProgram()
         ?.getSourceFile(fileName)
@@ -56,7 +56,7 @@ export function init(modules: { typescript: TS }): ts.server.PluginModule {
       )
       if (typeof positionOrRange !== "number") return prior
 
-      const { sourceFile, typeChecker } = getLSContest(fileName)
+      const { sourceFile, typeChecker } = getLSContext(fileName)
 
       const refactorCase = getRefactorCase(
         typescript,
@@ -109,7 +109,7 @@ export function init(modules: { typescript: TS }): ts.server.PluginModule {
       /* v8 ignore stop -- @preserve */
 
       assert(typeof positionOrRange === "number")
-      const { sourceFile, typeChecker } = getLSContest(fileName)
+      const { sourceFile, typeChecker } = getLSContext(fileName)
 
       const refactorCase = getRefactorCase(
         typescript,
@@ -211,7 +211,7 @@ export function init(modules: { typescript: TS }): ts.server.PluginModule {
         position,
         options,
       )
-      const { sourceFile, typeChecker } = getLSContest(fileName)
+      const { sourceFile, typeChecker } = getLSContext(fileName)
 
       const comp = getCompletionCase(typescript, sourceFile, position)
       if (comp === undefined) return prior
