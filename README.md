@@ -1,6 +1,7 @@
 # ts-exhaustive-match-plugin
 
-[![npm version](https://badge.fury.io/js/ts-exhaustive-match-plugin.svg)](https://badge.fury.io/js/ts-exhaustive-match-plugin)
+[![npm version](https://img.shields.io/npm/v/ts-exhaustive-match-plugin.svg)](https://www.npmjs.com/package/ts-exhaustive-match-plugin)
+[![npm downloads](https://img.shields.io/npm/dm/ts-exhaustive-match-plugin.svg)](https://www.npmjs.com/package/ts-exhaustive-match-plugin)
 [![CI](https://github.com/joseperez-gemini/ts-exhaustive-match-plugin/actions/workflows/ci.yml/badge.svg)](https://github.com/joseperez-gemini/ts-exhaustive-match-plugin/actions/workflows/ci.yml)
 [![Coverage Status](https://coveralls.io/repos/github/joseperez-gemini/ts-exhaustive-match-plugin/badge.svg?branch=main)](https://coveralls.io/github/joseperez-gemini/ts-exhaustive-match-plugin?branch=main)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.0+-blue.svg)](https://www.typescriptlang.org/)
