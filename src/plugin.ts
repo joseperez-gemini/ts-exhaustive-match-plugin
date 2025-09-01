@@ -1,25 +1,36 @@
-import * as ts from "typescript/lib/tsserverlibrary"
+import {
+  getTokenAtPosition,
+  log,
+  pprintSimplifiedNode,
+  setTSLogger,
+  simplifyNode,
+} from "./utils"
+import type * as ts from "typescript/lib/tsserverlibrary"
 
-export function init(modules: {
-  typescript: typeof ts
-}): ts.server.PluginModule {
+export type TS = typeof ts
+
+export function init(modules: { typescript: TS }): ts.server.PluginModule {
   const typescript = modules.typescript
 
   function create(info: ts.server.PluginCreateInfo) {
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+    /* eslint-disable */
     const proxy: ts.LanguageService = Object.create(null)
-
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
     for (const k of Object.keys(
       info.languageService,
     ) as (keyof ts.LanguageService)[]) {
-      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
       const x = info.languageService[k]!
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion, @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-member-access
       ;(proxy as any)[k] = (...args: unknown[]) =>
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-type-assertion, @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-member-access
         (x as any).apply(info.languageService, args)
     }
+    setTSLogger((...args) => {
+      info.project?.projectService?.logger?.info(
+        "[ts-exhaustive-match] " +
+          args
+            .map((x) => (typeof x === "object" ? JSON.stringify(x) : String(x)))
+            .join(" "),
+      )
+    })
+    /* eslint-enable */
 
     proxy.getApplicableRefactors = (
       fileName,
@@ -47,7 +58,7 @@ export function init(modules: {
           : positionOrRange.pos
 
       // Find the identifier at the current position
-      const token = getTokenAtPosition(sourceFile, start, typescript)
+      const token = getTokenAtPosition(typescript, sourceFile, start)
       if (!token) return prior
 
       // Handle both standalone identifiers and identifiers in declarations
@@ -155,7 +166,7 @@ export function init(modules: {
           : positionOrRange.pos
 
       // Find the identifier at the current position
-      const token = getTokenAtPosition(sourceFile, start, typescript)
+      const token = getTokenAtPosition(typescript, sourceFile, start)
       if (!token) return undefined
 
       let identifier: ts.Identifier | undefined
@@ -215,9 +226,9 @@ export function init(modules: {
 
       // Get source declaration type for tag ordering
       const sourceDeclarationType = getSourceDeclarationType(
+        typescript,
         symbol,
         typeChecker,
-        typescript,
       )
 
       const newText = generateExhaustiveMatch(
@@ -227,6 +238,7 @@ export function init(modules: {
         typeChecker,
         typescript,
         sourceDeclarationType,
+        sourceFile,
       )
 
       // Find the best position to insert the code
@@ -287,58 +299,38 @@ export function init(modules: {
         currentNode = currentNode.parent
       }
 
-      // Get proper indentation based on context
-      let baseIndent = ""
+      // Calculate base indentation based on AST block nesting at insertion point
+      let blockDepth = 0
 
-      // Check if we're inserting inside a function body
-      let isInsideFunction = false
-      let tempNode = currentNode
-      while (tempNode.parent !== undefined) {
-        if (
-          (typescript.isFunctionDeclaration(tempNode.parent) ||
-            typescript.isFunctionExpression(tempNode.parent) ||
-            typescript.isArrowFunction(tempNode.parent) ||
-            typescript.isMethodDeclaration(tempNode.parent)) &&
-          tempNode.parent.body &&
-          typescript.isBlock(tempNode.parent.body)
-        ) {
-          isInsideFunction = true
-          const funcNode = tempNode.parent
-          const funcLine = sourceFile.getLineAndCharacterOfPosition(
-            funcNode.getStart(),
-          )
-          // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-          const funcLineStart = sourceFile.getLineStarts()[funcLine.line]!
-          const funcLineText = sourceFile.text.substring(
-            funcLineStart,
-            funcNode.getStart(),
-          )
-          const funcIndent = /^(\s*)/.exec(funcLineText)?.[1] ?? ""
-          baseIndent = funcIndent + "  " // Add one level of indentation
-          break
+      // Use TypeScript's utility to find the node containing the insertion position
+      const insertionNode = getTokenAtPosition(
+        typescript,
+        sourceFile,
+        insertPosition,
+      )
+      let contextNode: ts.Node | undefined = insertionNode
+
+      // Count how many block statements we're nested inside at the insertion point
+      while (contextNode) {
+        if (typescript.isBlock(contextNode)) {
+          blockDepth++
         }
-        tempNode = tempNode.parent
+        contextNode = contextNode.parent
       }
 
-      if (!isInsideFunction) {
-        // For other cases, get indentation from current position
-        const currentLine =
-          sourceFile.getLineAndCharacterOfPosition(insertPosition)
-        // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-        const lineStart = sourceFile.getLineStarts()[currentLine.line]!
-        const lineText = sourceFile.text.substring(lineStart, insertPosition)
-        baseIndent = /^(\s*)/.exec(lineText)?.[1] ?? ""
-        if (needsNewline === false) needsNewline = replaceLength === 0
-      }
+      // Calculate base indentation: 2 spaces per block level
+      const baseIndent = "  ".repeat(blockDepth)
 
-      // Format the generated code with proper indentation
+      // Check if we need a newline based on replacement context
+      if (needsNewline === false) needsNewline = replaceLength === 0
+
+      // Apply base indentation to the AST-generated code
       const formattedText =
-        (needsNewline || isInsideFunction ? "\n" : "") +
+        (needsNewline ? "\n" : "") +
         newText
           .split("\n")
           .map((line) => (line.length > 0 ? baseIndent + line : ""))
-          .join("\n") +
-        (needsNewline && isInsideFunction ? "\n" : "")
+          .join("\n")
 
       return {
         edits: [
@@ -364,190 +356,135 @@ export function init(modules: {
         position,
         options,
       )
-
-      // Get source file
       const sourceFile = info.languageService
         .getProgram()
         ?.getSourceFile(fileName)
       if (!sourceFile) return prior
-
-      // Find the token at the current position
-      const token = getTokenAtPosition(sourceFile, position, typescript)
-
-      // Get type checker
       const typeChecker = info.languageService.getProgram()?.getTypeChecker()
       if (!typeChecker) return prior
 
-      let variableToken: ts.Identifier | undefined
-      let symbol: ts.Symbol | undefined
-      let discriminantPrefix: string | undefined
+      log("DEBUG: cursor pos", position)
+      log("DEBUG: AST")
+      pprintSimplifiedNode(simplifyNode(typescript, sourceFile, position - 1))
+      log("DEBUG: END AST")
+      const varCase = getVarCompletionCase(typescript, sourceFile, position)
+      log(
+        "DEBUG: sub case",
+        varCase && { ...varCase, node: simplifyNode(typescript, varCase.node) },
+      )
+      const comp = getCompletionCase(typescript, sourceFile, position)
+      log(
+        "DEBUG: Completion case",
+        comp && {
+          ...comp,
+          node: simplifyNode(typescript, comp.node),
+          sub: { ...comp.sub, node: simplifyNode(typescript, comp.sub.node) },
+        },
+      )
+      if (comp === undefined) return prior
 
-      // Check for standalone identifier (e.g., "x")
-      if (token && typescript.isIdentifier(token)) {
-        // Check if this identifier is part of a property access
-        if (
-          token.parent !== undefined &&
-          typescript.isPropertyAccessExpression(token.parent)
-        ) {
-          // This is "x" in "x.something"
-          if (token.parent.expression === token) {
-            variableToken = token
-            symbol = typeChecker.getSymbolAtLocation(token)
-          }
-          // This is "something" in "x.something"
-          else if (
-            token.parent.name === token &&
-            typescript.isIdentifier(token.parent.expression)
-          ) {
-            variableToken = token.parent.expression
-            symbol = typeChecker.getSymbolAtLocation(variableToken)
-            discriminantPrefix = token.text
-          }
-        } else {
-          // Check if we're in an if statement context - if so, only proceed if there's a dot
-          const variableStart = token.getStart(sourceFile)
-          const textBeforeVariable = sourceFile.text.substring(0, variableStart)
-          const ifPattern = /if\s*\(\s*$/
-
-          if (ifPattern.test(textBeforeVariable)) {
-            // We're in an if statement - only proceed if there's property access intention
-            const variableEnd = token.getEnd()
-            const textFromVariable = sourceFile.text.substring(
-              variableEnd,
-              position,
-            )
-            if (!textFromVariable.includes(".")) {
-              return prior // Don't provide completion for plain "if (x"
-            }
-          }
-
-          // Regular standalone identifier
-          variableToken = token
-          symbol = typeChecker.getSymbolAtLocation(token)
-        }
-      }
-      // Check for scenarios where cursor is right after dot (e.g., "x.|")
-      else {
-        // Look backwards for a dot token
-        let searchPos = position - 1
-        while (searchPos > 0) {
-          const charAtPos = sourceFile.text.charAt(searchPos)
-          if (charAtPos === ".") {
-            // Found a dot, now find the property access expression
-            const dotToken = getTokenAtPosition(
-              sourceFile,
-              searchPos,
-              typescript,
-            )
-            if (dotToken && dotToken.kind === typescript.SyntaxKind.DotToken) {
-              const propAccess = dotToken.parent
-              if (
-                typescript.isPropertyAccessExpression(propAccess) &&
-                typescript.isIdentifier(propAccess.expression)
-              ) {
-                variableToken = propAccess.expression
-                symbol = typeChecker.getSymbolAtLocation(variableToken)
-                break
-              }
-            }
-          } else if (!/\s/.test(charAtPos)) {
-            // Hit non-whitespace that's not a dot, stop searching
-            break
-          }
-          searchPos--
-        }
+      const target =
+        comp.sub.tag === "identifier" ? comp.sub.node : comp.sub.node.expression
+      const narrowedTargetType = typeChecker.getTypeAtLocation(target)
+      log("DEBUG: target expr", simplifyNode(typescript, target))
+      log("DEBUG: target type", typeChecker.typeToString(narrowedTargetType))
+      const targetTypeUnion = getDiscriminatedUnionFromType(
+        typescript,
+        typeChecker,
+        narrowedTargetType,
+      )
+      if (targetTypeUnion === undefined) return prior
+      log("DEBUG: target type union", targetTypeUnion)
+      if (
+        comp.sub.tag === "propAccess" &&
+        !targetTypeUnion.discriminant.startsWith(comp.sub.node.name.text)
+      ) {
+        return prior
       }
 
-      if (!variableToken || !symbol) return prior
-
-      // Use the narrowed type at the current location for exhaustiveness checking
-      const type = typeChecker.getTypeAtLocation(variableToken)
-
-      // Check if it's a discriminated union
-      if (!isDiscriminatedUnion(type, typeChecker, typescript)) return prior
-
-      const discriminantProperty = findDiscriminantProperty(
-        type,
-        typeChecker,
+      const targetSymbol = typeChecker.getSymbolAtLocation(target)
+      if (targetSymbol === undefined) return prior
+      log("DEBUG: target symbol", typeChecker.symbolToString(targetSymbol))
+      const declarationType = getSourceDeclarationType(
         typescript,
+        targetSymbol,
+        typeChecker,
       )
-      if (discriminantProperty === undefined) return prior
+      if (declarationType === undefined) return prior
+      log(
+        "DEBUG: target symbol decl",
+        typeChecker.typeToString(declarationType),
+      )
 
-      // If we have a discriminant prefix, check if it matches the discriminant property
-      if (discriminantPrefix !== undefined) {
-        if (!discriminantProperty.startsWith(discriminantPrefix)) {
-          return prior
-        }
+      const declarationUnion = getDiscriminatedUnionFromType(
+        typescript,
+        typeChecker,
+        declarationType,
+      )
+      if (declarationUnion === undefined) return prior
+      log("DEBUG: declaration union", declarationUnion)
+
+      const declSortedCases = [...declarationUnion.alternatives]
+      const sortedCases = [...targetTypeUnion.alternatives].sort(
+        (a, b) => declSortedCases.indexOf(a) - declSortedCases.indexOf(b),
+      )
+
+      // TODO: We should use the expression itself, not only its symbol name
+      // which only works for identifiers
+      const ast = createExhaustiveMatchAST(
+        typescript,
+        targetSymbol.name,
+        targetTypeUnion.discriminant,
+        sortedCases,
+      )
+      log("DEBUG: AST")
+      pprintSimplifiedNode(simplifyNode(typescript, ast))
+
+      let snippetText = printASTWithPlaceholderReplacement(
+        typescript,
+        sourceFile,
+        ast,
+        true,
+        0,
+      )
+      const replacementSpan = {
+        start: comp.node.getStart(),
+        length: comp.node.getEnd() - comp.node.getStart(),
       }
 
-      // Get source declaration type for tag ordering
-      const sourceDeclarationType = getSourceDeclarationType(
-        symbol,
-        typeChecker,
-        typescript,
-      )
-
-      // Generate exhaustive match completion
-      const variableName = variableToken.text
-      const snippetText = generateExhaustiveMatchSnippet(
-        variableName,
-        type,
-        discriminantProperty,
-        typeChecker,
-        typescript,
-        sourceDeclarationType,
-      )
-
-      if (snippetText !== undefined) {
-        // Calculate replacement span based on the scenario
-        let replacementSpan: { start: number; length: number }
-
-        // Check if we're inside an incomplete if statement
-        const ifStatementInfo = findIncompleteIfStatement(
-          sourceFile,
-          variableToken,
-          position,
+      if (
+        comp.tag === "ifStatement" &&
+        !(
+          comp.node.thenStatement.getStart() ===
+            comp.node.thenStatement.getEnd() ||
+          (typescript.isBlock(comp.node.thenStatement) &&
+            comp.node.thenStatement.statements.length === 0)
         )
+      ) {
+        replacementSpan.length =
+          comp.node.thenStatement.getStart() - comp.node.getStart()
+        snippetText += "\n"
+      }
+      log("DEBUG: result snippet\n", snippetText)
 
-        if (ifStatementInfo !== undefined) {
-          // Replace from the start of the if statement to the end of the incomplete expression
-          replacementSpan = {
-            start: ifStatementInfo.start,
-            length: ifStatementInfo.end - ifStatementInfo.start,
-          }
-        } else if (discriminantPrefix !== undefined) {
-          // For "x.t" scenarios, replace from the variable start to the cursor position
-          replacementSpan = {
-            start: variableToken.getStart(sourceFile),
-            length: position - variableToken.getStart(sourceFile),
-          }
-        } else {
-          // For "x." or "x" scenarios, replace from variable start to cursor position
-          replacementSpan = {
-            start: variableToken.getStart(sourceFile),
-            length: position - variableToken.getStart(sourceFile),
-          }
-        }
+      const customCompletion = {
+        name: `${targetSymbol.name}.${targetTypeUnion.discriminant} (exhaustive match)`,
+        kind: typescript.ScriptElementKind.unknown,
+        kindModifiers: "",
+        sortText: "0", // High priority
+        insertText: snippetText,
+        isSnippet: true as const,
+        replacementSpan,
+      }
 
-        const customCompletion = {
-          name: `${variableName} (exhaustive match)`,
-          kind: typescript.ScriptElementKind.unknown,
-          kindModifiers: "",
-          sortText: "0", // High priority
-          insertText: snippetText,
-          isSnippet: true as const,
-          replacementSpan,
-        }
-
-        if (prior) {
-          prior.entries = [customCompletion, ...prior.entries]
-        } else {
-          return {
-            isGlobalCompletion: false,
-            isMemberCompletion: false,
-            isNewIdentifierLocation: false,
-            entries: [customCompletion],
-          }
+      if (prior) {
+        prior.entries = [customCompletion, ...prior.entries]
+      } else {
+        return {
+          isGlobalCompletion: false,
+          isMemberCompletion: false,
+          isNewIdentifierLocation: false,
+          entries: [customCompletion],
         }
       }
 
@@ -556,39 +493,13 @@ export function init(modules: {
 
     return proxy
   }
-
   return { create }
 }
 
-function getTokenAtPosition(
-  sourceFile: ts.SourceFile,
-  position: number,
-  typescript: typeof ts,
-): ts.Node | undefined {
-  function find(node: ts.Node): ts.Node | undefined {
-    if (position >= node.getStart(sourceFile) && position <= node.getEnd()) {
-      const children: ts.Node[] = []
-      typescript.forEachChild(node, (child) => {
-        children.push(child)
-        return undefined
-      })
-
-      for (const child of children) {
-        const result = find(child)
-        if (result) return result
-      }
-
-      return node
-    }
-    return undefined
-  }
-  return find(sourceFile)
-}
-
 function getSourceDeclarationType(
+  typescript: TS,
   symbol: ts.Symbol,
   typeChecker: ts.TypeChecker,
-  typescript: typeof ts,
 ): ts.Type | undefined {
   // Get the declared type from source for tag ordering purposes
   if (symbol.declarations && symbol.declarations.length > 0) {
@@ -609,58 +520,10 @@ function getSourceDeclarationType(
   return undefined
 }
 
-function findIncompleteIfStatement(
-  sourceFile: ts.SourceFile,
-  variableToken: ts.Identifier,
-  cursorPosition: number,
-): { start: number; end: number } | undefined {
-  // Look backwards from the variable token to find "if (" pattern
-  const variableStart = variableToken.getStart(sourceFile)
-  const textBeforeVariable = sourceFile.text.substring(0, variableStart)
-
-  // Look for "if (" pattern before the variable, allowing for whitespace
-  const ifPattern = /if\s*\(\s*$/
-  const match = ifPattern.exec(textBeforeVariable)
-
-  if (match) {
-    // Check if there's a dot after the variable - only handle property access scenarios
-    const variableEnd = variableToken.getEnd()
-    const textFromVariable = sourceFile.text.substring(
-      variableEnd,
-      cursorPosition,
-    )
-
-    // Only proceed if we find a dot (indicating property access intention)
-    if (!textFromVariable.includes(".")) {
-      return undefined
-    }
-
-    const ifStartPosition = textBeforeVariable.length - match[0].length
-
-    // Look forward from cursor to find the end of the incomplete expression
-    // Handle cases like "if (x.|)" or "if (x.|) {}"
-    let endPosition = cursorPosition
-    const textAfterCursor = sourceFile.text.substring(cursorPosition)
-
-    // Look for closing paren and potentially empty braces (including multiline)
-    const closingParenMatch = /^\s*\)(\s*\{[\s\n]*\})?/.exec(textAfterCursor)
-    if (closingParenMatch) {
-      endPosition = cursorPosition + closingParenMatch[0].length
-    }
-
-    return {
-      start: ifStartPosition,
-      end: endPosition,
-    }
-  }
-
-  return undefined
-}
-
 function isDiscriminatedUnion(
   type: ts.Type,
   typeChecker: ts.TypeChecker,
-  typescript: typeof ts,
+  typescript: TS,
 ): boolean {
   if ((type.flags & typescript.TypeFlags.Union) === 0) return false
 
@@ -706,7 +569,7 @@ function isDiscriminatedUnion(
 function findDiscriminantProperty(
   type: ts.Type,
   typeChecker: ts.TypeChecker,
-  typescript: typeof ts,
+  typescript: TS,
 ): string | undefined {
   if ((type.flags & typescript.TypeFlags.Union) === 0) return undefined
 
@@ -767,8 +630,9 @@ function generateExhaustiveMatch(
   type: ts.Type,
   discriminantProperty: string,
   typeChecker: ts.TypeChecker,
-  typescript: typeof ts,
+  typescript: TS,
   sourceDeclarationType?: ts.Type,
+  sourceFile?: ts.SourceFile,
 ): string {
   if ((type.flags & typescript.TypeFlags.Union) === 0) return ""
 
@@ -848,6 +712,24 @@ function generateExhaustiveMatch(
 
   if (cases.length === 0) return ""
 
+  // Use AST-based generation if sourceFile is provided
+  if (sourceFile) {
+    const astNode = createExhaustiveMatchAST(
+      typescript,
+      variableName,
+      discriminantProperty,
+      cases,
+    )
+    return printASTWithPlaceholderReplacement(
+      typescript,
+      sourceFile,
+      astNode,
+      false,
+      0,
+    )
+  }
+
+  // Fallback to string-based generation (legacy)
   let result = ""
   for (let i = 0; i < cases.length; i++) {
     if (i === 0) {
@@ -864,104 +746,251 @@ function generateExhaustiveMatch(
   return result
 }
 
-function generateExhaustiveMatchSnippet(
-  variableName: string,
-  type: ts.Type,
-  discriminantProperty: string,
-  typeChecker: ts.TypeChecker,
-  typescript: typeof ts,
-  sourceDeclarationType?: ts.Type,
-): string | undefined {
-  if ((type.flags & typescript.TypeFlags.Union) === 0) return undefined
+type ExprCompletionCase =
+  | {
+      tag: "identifier"
+      node: ts.Identifier
+    }
+  | {
+      tag: "propAccess"
+      node: ts.PropertyAccessExpression
+    }
+type CompletionCase =
+  | {
+      tag: "statement"
+      node: ts.ExpressionStatement
+      sub: ExprCompletionCase
+    }
+  | {
+      tag: "ifStatement"
+      node: ts.IfStatement
+      sub: ExprCompletionCase
+    }
 
-  // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
-  const unionType = type as ts.UnionType
-  const unionTypes = unionType.types
+function getVarCompletionCase(
+  typescript: TS,
+  sourceFile: ts.SourceFile,
+  position: number,
+): ExprCompletionCase | undefined {
+  const prevPos = position - 1
+  if (prevPos < 0) return undefined
 
-  // Use source declaration type for ordering if available, otherwise use narrowed type
-  const typeForOrdering =
-    sourceDeclarationType &&
-    (sourceDeclarationType.flags & typescript.TypeFlags.Union) !== 0
-      ? // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
-        (sourceDeclarationType as ts.UnionType)
-      : unionType
+  const curToken = getTokenAtPosition(typescript, sourceFile, position)
+  log("DEBUG: curToken", curToken && simplifyNode(typescript, curToken))
 
-  // Collect cases with their source positions for ordering
-  const casesWithPositions: { value: string; position: number }[] = []
+  const prevToken = getTokenAtPosition(typescript, sourceFile, prevPos)
+  log("DEBUG: prevToken", prevToken && simplifyNode(typescript, prevToken))
+  if (prevToken === undefined) return undefined
 
-  for (const subType of typeForOrdering.types) {
-    const discriminantProp = subType.getProperty(discriminantProperty)
-    if (discriminantProp) {
-      const discriminantType = typeChecker.getTypeOfSymbolAtLocation(
-        discriminantProp,
-        // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-        discriminantProp.valueDeclaration!,
-      )
-
-      if ((discriminantType.flags & typescript.TypeFlags.StringLiteral) !== 0) {
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
-        const literalValue = (discriminantType as ts.StringLiteralType).value
-
-        // Only include this case if it exists in the narrowed type
-        const existsInNarrowedType = unionTypes.some((narrowedSubType) => {
-          const narrowedDiscriminantProp =
-            narrowedSubType.getProperty(discriminantProperty)
-          if (narrowedDiscriminantProp) {
-            const narrowedDiscriminantType =
-              typeChecker.getTypeOfSymbolAtLocation(
-                narrowedDiscriminantProp,
-                // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-                narrowedDiscriminantProp.valueDeclaration!,
-              )
-            if (
-              (narrowedDiscriminantType.flags &
-                typescript.TypeFlags.StringLiteral) !==
-              0
-            ) {
-              return (
-                // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
-                (narrowedDiscriminantType as ts.StringLiteralType).value ===
-                literalValue
-              )
-            }
-          }
-          return false
-        })
-
-        if (existsInNarrowedType) {
-          // Try to get source position from the discriminant property's value declaration
-          let sourcePosition = 0
-          if (discriminantProp.valueDeclaration) {
-            sourcePosition = discriminantProp.valueDeclaration.getStart()
-          }
-
-          casesWithPositions.push({
-            value: literalValue,
-            position: sourcePosition,
-          })
-        }
+  if (typescript.isIdentifier(prevToken)) {
+    const parent = prevToken.parent
+    // TODO: Handle property chains
+    if (parent !== undefined && typescript.isPropertyAccessExpression(parent)) {
+      return {
+        tag: "propAccess",
+        node: parent,
+      }
+    } else {
+      return {
+        tag: "identifier",
+        node: prevToken,
       }
     }
+  } else if (typescript.isPropertyAccessExpression(prevToken)) {
+    return {
+      tag: "propAccess",
+      node: prevToken,
+    }
+  } else {
+    return undefined
+  }
+}
+
+function getCompletionCase(
+  typescript: TS,
+  sourceFile: ts.SourceFile,
+  position: number,
+): CompletionCase | undefined {
+  const varCase = getVarCompletionCase(typescript, sourceFile, position)
+  if (varCase === undefined) return undefined
+
+  const varCaseParent = varCase.node.parent
+  if (varCaseParent === undefined) return undefined
+
+  if (typescript.isIfStatement(varCaseParent)) {
+    return {
+      tag: "ifStatement",
+      node: varCaseParent,
+      sub: varCase,
+    }
+  } else if (typescript.isExpressionStatement(varCaseParent)) {
+    return {
+      tag: "statement",
+      node: varCaseParent,
+      sub: varCase,
+    }
+  } else {
+    return undefined
+  }
+}
+
+function isUnionType(typescript: TS, type: ts.Type): type is ts.UnionType {
+  return (type.flags & typescript.TypeFlags.Union) !== 0
+}
+
+function isObjectType(typescript: TS, type: ts.Type): type is ts.ObjectType {
+  return (type.flags & typescript.TypeFlags.Object) !== 0
+}
+
+function isStringLiteral(
+  typescript: TS,
+  type: ts.Type,
+): type is ts.StringLiteralType {
+  return (type.flags & typescript.TypeFlags.StringLiteral) !== 0
+}
+
+type DiscriminatedUnion = {
+  discriminant: "tag"
+  alternatives: Set<string>
+}
+function getDiscriminatedUnionFromType(
+  typescript: TS,
+  typeChecker: ts.TypeChecker,
+  type: ts.Type,
+): DiscriminatedUnion | undefined {
+  if (!isUnionType(typescript, type)) return
+
+  const alternatives: Set<string> = new Set()
+
+  // TODO: Auto-detect discriminant name
+  for (const subtype of type.types) {
+    if (!isObjectType(typescript, subtype)) return
+    let foundDiscriminant = false
+    for (const prop of typeChecker.getPropertiesOfType(subtype)) {
+      if (prop.name !== "tag") continue
+      const propType = typeChecker.getTypeOfSymbol(prop)
+      if (!isStringLiteral(typescript, propType)) return
+      alternatives.add(propType.value)
+      foundDiscriminant = true
+    }
+    if (!foundDiscriminant) return
   }
 
-  // Sort by source position to maintain declaration order
-  casesWithPositions.sort((a, b) => a.position - b.position)
-  const cases = casesWithPositions.map((c) => c.value)
+  return {
+    discriminant: "tag",
+    alternatives,
+  }
+}
 
-  if (cases.length === 0) return undefined
-
-  let result = `if (${variableName}.${discriminantProperty} === "${cases[0]}") {\n`
-  // eslint-disable-next-line no-template-curly-in-string
-  result += "  ${1}\n"
-
-  for (let i = 1; i < cases.length; i++) {
-    result += `} else if (${variableName}.${discriminantProperty} === "${cases[i]}") {\n`
-    result += `  \${${i + 1}}\n`
+function createExhaustiveMatchAST(
+  typescript: TS,
+  variableName: string,
+  discriminantProperty: string,
+  cases: string[],
+): ts.IfStatement {
+  function createCondition(tagValue: string) {
+    return typescript.factory.createBinaryExpression(
+      typescript.factory.createPropertyAccessExpression(
+        typescript.factory.createIdentifier(variableName),
+        discriminantProperty,
+      ),
+      typescript.SyntaxKind.EqualsEqualsEqualsToken,
+      typescript.factory.createStringLiteral(tagValue),
+    )
   }
 
-  result += `} else {\n`
-  result += `  ${variableName} satisfies never;\n`
-  result += `}`
+  function createCaseBlock(index: number) {
+    return typescript.factory.createBlock(
+      [
+        typescript.factory.createExpressionStatement(
+          typescript.factory.createIdentifier(
+            `__SNIPPET_PLACEHOLDER_${index + 1}__`,
+          ),
+        ),
+      ],
+      true,
+    )
+  }
 
-  return result
+  function createNeverBlock() {
+    return typescript.factory.createBlock(
+      [
+        typescript.factory.createExpressionStatement(
+          typescript.factory.createSatisfiesExpression(
+            typescript.factory.createIdentifier(variableName),
+            typescript.factory.createKeywordTypeNode(
+              typescript.SyntaxKind.NeverKeyword,
+            ),
+          ),
+        ),
+      ],
+      true,
+    )
+  }
+
+  // Build the if-else chain from the end backwards
+  let statement: ts.Statement = createNeverBlock()
+  for (let i = cases.length - 1; i >= 0; i--) {
+    statement = typescript.factory.createIfStatement(
+      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+      createCondition(cases[i]!),
+      createCaseBlock(i),
+      statement,
+    )
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+  return statement as ts.IfStatement
+}
+
+function printASTWithPlaceholderReplacement(
+  typescript: TS,
+  sourceFile: ts.SourceFile,
+  astNode: ts.Node,
+  isSnippet: boolean,
+  allLinesIndent: number,
+): string {
+  const printer = typescript.createPrinter({
+    newLine: typescript.NewLineKind.LineFeed,
+    removeComments: false,
+    omitTrailingSemicolon: false,
+  })
+
+  let formattedCode = printer.printNode(
+    typescript.EmitHint.Unspecified,
+    astNode,
+    sourceFile,
+  )
+
+  if (isSnippet) {
+    formattedCode = formattedCode.replace(
+      /__SNIPPET_PLACEHOLDER_(\d+)__;?/g,
+      // eslint-disable-next-line no-template-curly-in-string
+      "${$1}",
+    )
+  } else {
+    formattedCode = formattedCode.replace(
+      /__SNIPPET_PLACEHOLDER_(\d+)__;?/g,
+      "",
+    )
+  }
+
+  formattedCode = formattedCode.replace(/^(    )+/gm, (match) => {
+    const spaceCount = match.length
+    const indentLevel = spaceCount / 4
+    return "  ".repeat(indentLevel)
+  })
+  formattedCode = formattedCode.replace(/}\s*\n(\s*)else if/g, "} else if")
+  formattedCode = formattedCode.replace(/}\s*\n(\s*)else \{/g, "} else {")
+
+  // Apply base indentation to all lines at the end
+  if (allLinesIndent > 0) {
+    const baseIndent = "  ".repeat(allLinesIndent)
+    formattedCode = formattedCode
+      .split("\n")
+      .map((line) => (line.length > 0 ? baseIndent + line : line))
+      .join("\n")
+  }
+
+  return formattedCode
 }

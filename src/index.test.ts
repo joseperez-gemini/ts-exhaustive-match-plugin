@@ -1,5 +1,6 @@
 import { init } from "./plugin"
 
+import { getCodeIndentationLevel, getTokenAtPosition } from "./utils"
 import ts from "typescript"
 import { describe, expect, it } from "vitest"
 
@@ -47,9 +48,11 @@ describe("TypeScript Exhaustive Match Plugin", () => {
 
   const CURSOR_MARKER = "/*cursor*/"
   function processInput(input: string): [code: string, position: number] {
-    const position = input.indexOf(CURSOR_MARKER)
+    const trimmedInput = input.trim()
+    const code = trimmedInput.replace(CURSOR_MARKER, "")
+    const position = trimmedInput.indexOf(CURSOR_MARKER)
     if (position === -1) throw new Error("Cursor marker not found in input")
-    return [input.replace(CURSOR_MARKER, ""), position]
+    return [code, position]
   }
 
   const REFACTOR_BASE_TEST_CASES = [
@@ -58,6 +61,7 @@ describe("TypeScript Exhaustive Match Plugin", () => {
       input: `
 type Test = { tag: "a" } | { tag: "b" };
 const /*cursor*/x: Test = {} as Test;
+const other = 0
       `,
       output: `
 type Test = { tag: "a" } | { tag: "b" };
@@ -69,6 +73,7 @@ if (x.tag === "a") {
 } else {
   x satisfies never;
 }
+const other = 0
       `,
     },
     {
@@ -466,6 +471,7 @@ if (x.tag === "a") {
   // Generate test cases for if statement contexts using both x. and x.t patterns
 
   const propertyAccessPrefixes = [
+    { cursor: "x/*cursor*/", name: "plain identifier" },
     { cursor: "x./*cursor*/", name: "property access" },
     { cursor: "x.t/*cursor*/", name: "discriminant prefix" },
   ]
@@ -524,6 +530,38 @@ if (x.tag === "a") {
     }
   }
 
+  COMPLETION_IF_STATEMENT_TEST_CASES.push({
+    name: `should provide exhaustive match completion when for if statements with unrelated content after them`,
+    input: `
+type Test = { tag: "a" } | { tag: "b" };
+const x: Test = {} as Test;
+if (x.t/*cursor*/)
+console.log()
+        `,
+    completion: `
+if (x.tag === "a") {
+  \${1}
+} else if (x.tag === "b") {
+  \${2}
+} else {
+  x satisfies never;
+}
+\\
+        `,
+    output: `
+type Test = { tag: "a" } | { tag: "b" };
+const x: Test = {} as Test;
+if (x.tag === "a") {
+  \\
+} else if (x.tag === "b") {
+  \\
+} else {
+  x satisfies never;
+}
+console.log()
+        `,
+  })
+
   const COMPLETION_NEGATIVE_TEST_CASES = [
     {
       name: "should not provide exhaustive match completion for non-discriminant prefix",
@@ -557,50 +595,10 @@ const x: Simple = {} as Simple;
 if (x/*cursor*/
       `,
     },
-    {
-      name: "should not provide exhaustive match completion for plain identifier in if statement",
-      input: `
-type Test = { tag: "a" } | { tag: "b" };
-const x: Test = {} as Test;
-if (x/*cursor*/
-      `,
-    },
   ]
 
   // Type narrowing test cases
   const COMPLETION_NARROWING_TEST_CASES = [
-    {
-      name: "should work with narrowed types after type guard",
-      input: `
-type Test = { tag: "a"; value: number } | { tag: "b"; value: string } | { tag: "c"; value: boolean };
-const x: Test = {} as Test;
-if (x.tag !== "c") {
-  /*cursor*/x
-}
-      `,
-      completion: `
-if (x.tag === "a") {
-  \${1}
-} else if (x.tag === "b") {
-  \${2}
-} else {
-  x satisfies never;
-}
-      `,
-      output: `
-type Test = { tag: "a"; value: number } | { tag: "b"; value: string } | { tag: "c"; value: boolean };
-const x: Test = {} as Test;
-if (x.tag !== "c") {
-  if (x.tag === "a") {
-    \\
-  } else if (x.tag === "b") {
-    \\
-  } else {
-    x satisfies never;
-  }
-}
-      `,
-    },
     {
       name: "should provide narrowed completions when typing property access after type guard",
       input: `
@@ -657,18 +655,65 @@ if (x.tag !== "c") {
       )
       expect(exhaustiveCompletion).toBeDefined()
       expect(exhaustiveCompletion?.isSnippet).toBe(true)
-      expect(exhaustiveCompletion?.insertText?.trim()).toBe(completion.trim())
+      expect(exhaustiveCompletion?.insertText).toBe(
+        completion.trim().replace(/\\\n/, "\n").replace(/\\$/, ""),
+      )
 
       // Test that the completion correctly replaces the identifier
-      if (exhaustiveCompletion?.replacementSpan) {
-        const replacementStart = exhaustiveCompletion.replacementSpan.start
-        const replacementLength = exhaustiveCompletion.replacementSpan.length
-        const snippetWithoutTabStops = completion.replace(/\$\{\d+\}/g, "")
+      if (
+        exhaustiveCompletion?.replacementSpan !== undefined &&
+        exhaustiveCompletion?.insertText !== undefined
+      ) {
+        const replacement = exhaustiveCompletion.replacementSpan
+        const snippetWithoutTabStops = exhaustiveCompletion.insertText.replace(
+          /\$\{\d+\}/g,
+          "",
+        )
+
+        // Get the source file to calculate indentation
+        const sourceFile = ts.createSourceFile(
+          TEST_FILE_NAME,
+          inputCode,
+          ts.ScriptTarget.Latest,
+          true,
+        )
+
+        // Find the node at the replacement position to get indentation level
+        const nodeAtPosition = getTokenAtPosition(
+          ts,
+          sourceFile,
+          replacement.start,
+        )
+        const indentLevel = nodeAtPosition
+          ? getCodeIndentationLevel(ts, nodeAtPosition)
+          : 0
+        const baseIndent = "  ".repeat(indentLevel)
+
+        // Apply indentation to each line of the snippet
+        const indentedSnippet = snippetWithoutTabStops
+          .split("\n")
+          .map((line, index) => {
+            // Don't indent empty lines
+            if (line.length === 0) return line
+            // First line doesn't need indentation if it's continuing the current line
+            if (
+              index === 0 &&
+              replacement.start > 0 &&
+              inputCode[replacement.start - 1] !== "\n"
+            ) {
+              return line
+            }
+            return baseIndent + line
+          })
+          .join("\n")
 
         const resultCode =
-          inputCode.slice(0, replacementStart) +
-          snippetWithoutTabStops.trim() +
-          inputCode.slice(replacementStart + replacementLength)
+          inputCode.slice(0, replacement.start) +
+          indentedSnippet +
+          inputCode.slice(replacement.start + replacement.length)
+
+        console.log("DEBUG: expectedCode", resultCode)
+        console.log("DEBUG: resultCode", resultCode)
 
         const expectedCode = output.replace(/ \\\n/g, " \n")
         expect(resultCode.trim()).toBe(expectedCode.trim())
