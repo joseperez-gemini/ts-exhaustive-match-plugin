@@ -1,6 +1,6 @@
 {
   "name": "ts-exhaustive-match-plugin",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "description": "TypeScript Language Service Plugin for generating exhaustive pattern matching",
   "main": "lib/index.js",
   "scripts": {
