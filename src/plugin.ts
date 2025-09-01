@@ -1,10 +1,4 @@
-import {
-  getTokenAtPosition,
-  log,
-  pprintSimplifiedNode,
-  setTSLogger,
-  simplifyNode,
-} from "./utils"
+import { getTokenAtPosition, setTSLogger } from "./utils"
 import type * as ts from "typescript/lib/tsserverlibrary"
 
 export type TS = typeof ts
@@ -359,62 +353,40 @@ export function init(modules: { typescript: TS }): ts.server.PluginModule {
       const sourceFile = info.languageService
         .getProgram()
         ?.getSourceFile(fileName)
-      if (!sourceFile) return prior
+      if (sourceFile === undefined) return prior
       const typeChecker = info.languageService.getProgram()?.getTypeChecker()
-      if (!typeChecker) return prior
+      if (typeChecker === undefined) return prior
 
-      log("DEBUG: cursor pos", position)
-      log("DEBUG: AST")
-      pprintSimplifiedNode(simplifyNode(typescript, sourceFile, position - 1))
-      log("DEBUG: END AST")
-      const varCase = getVarCompletionCase(typescript, sourceFile, position)
-      log(
-        "DEBUG: sub case",
-        varCase && { ...varCase, node: simplifyNode(typescript, varCase.node) },
-      )
       const comp = getCompletionCase(typescript, sourceFile, position)
-      log(
-        "DEBUG: Completion case",
-        comp && {
-          ...comp,
-          node: simplifyNode(typescript, comp.node),
-          sub: { ...comp.sub, node: simplifyNode(typescript, comp.sub.node) },
-        },
-      )
       if (comp === undefined) return prior
 
       const target =
         comp.sub.tag === "identifier" ? comp.sub.node : comp.sub.node.expression
       const narrowedTargetType = typeChecker.getTypeAtLocation(target)
-      log("DEBUG: target expr", simplifyNode(typescript, target))
-      log("DEBUG: target type", typeChecker.typeToString(narrowedTargetType))
-      const targetTypeUnion = getDiscriminatedUnionFromType(
+      const targetType = getDiscriminatedUnionFromType(
         typescript,
         typeChecker,
         narrowedTargetType,
       )
-      if (targetTypeUnion === undefined) return prior
-      log("DEBUG: target type union", targetTypeUnion)
+      if (targetType === undefined) return prior
+
+      // Bail out when prop access is not a prefix of the discriminant
       if (
         comp.sub.tag === "propAccess" &&
-        !targetTypeUnion.discriminant.startsWith(comp.sub.node.name.text)
+        !targetType.discriminant.startsWith(comp.sub.node.name.text)
       ) {
         return prior
       }
 
       const targetSymbol = typeChecker.getSymbolAtLocation(target)
       if (targetSymbol === undefined) return prior
-      log("DEBUG: target symbol", typeChecker.symbolToString(targetSymbol))
+
       const declarationType = getSourceDeclarationType(
         typescript,
         targetSymbol,
         typeChecker,
       )
       if (declarationType === undefined) return prior
-      log(
-        "DEBUG: target symbol decl",
-        typeChecker.typeToString(declarationType),
-      )
 
       const declarationUnion = getDiscriminatedUnionFromType(
         typescript,
@@ -422,23 +394,19 @@ export function init(modules: { typescript: TS }): ts.server.PluginModule {
         declarationType,
       )
       if (declarationUnion === undefined) return prior
-      log("DEBUG: declaration union", declarationUnion)
 
       const declSortedCases = [...declarationUnion.alternatives]
-      const sortedCases = [...targetTypeUnion.alternatives].sort(
+      const sortedCases = [...targetType.alternatives].sort(
         (a, b) => declSortedCases.indexOf(a) - declSortedCases.indexOf(b),
       )
-
       // TODO: We should use the expression itself, not only its symbol name
       // which only works for identifiers
       const ast = createExhaustiveMatchAST(
         typescript,
         targetSymbol.name,
-        targetTypeUnion.discriminant,
+        targetType.discriminant,
         sortedCases,
       )
-      log("DEBUG: AST")
-      pprintSimplifiedNode(simplifyNode(typescript, ast))
 
       let snippetText = printASTWithPlaceholderReplacement(
         typescript,
@@ -465,10 +433,9 @@ export function init(modules: { typescript: TS }): ts.server.PluginModule {
           comp.node.thenStatement.getStart() - comp.node.getStart()
         snippetText += "\n"
       }
-      log("DEBUG: result snippet\n", snippetText)
 
       const customCompletion = {
-        name: `${targetSymbol.name}.${targetTypeUnion.discriminant} (exhaustive match)`,
+        name: `${targetSymbol.name}.${targetType.discriminant} (exhaustive match)`,
         kind: typescript.ScriptElementKind.unknown,
         kindModifiers: "",
         sortText: "0", // High priority
@@ -775,11 +742,7 @@ function getVarCompletionCase(
   const prevPos = position - 1
   if (prevPos < 0) return undefined
 
-  const curToken = getTokenAtPosition(typescript, sourceFile, position)
-  log("DEBUG: curToken", curToken && simplifyNode(typescript, curToken))
-
   const prevToken = getTokenAtPosition(typescript, sourceFile, prevPos)
-  log("DEBUG: prevToken", prevToken && simplifyNode(typescript, prevToken))
   if (prevToken === undefined) return undefined
 
   if (typescript.isIdentifier(prevToken)) {
