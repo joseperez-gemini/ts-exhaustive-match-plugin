@@ -52,8 +52,32 @@ describe("TypeScript Exhaustive Match Plugin", () => {
   }
 
   const CURSOR_MARKER = "/*cursor*/"
-  function processInput(input: string): [code: string, position: number] {
+  const CURSOR_POS_MARKER = "/*cursor pos*/"
+  const CURSOR_END_MARKER = "/*cursor end*/"
+
+  function processInput(
+    input: string,
+  ): [code: string, position: number | { pos: number; end: number }] {
     const trimmedInput = input.trim()
+
+    // Check for range markers first
+    const posIndex = trimmedInput.indexOf(CURSOR_POS_MARKER)
+    const endIndex = trimmedInput.indexOf(CURSOR_END_MARKER)
+
+    if (posIndex !== -1 && endIndex !== -1) {
+      if (posIndex >= endIndex)
+        throw new Error("cursor pos must come before cursor end")
+
+      const code = trimmedInput
+        .replace(CURSOR_POS_MARKER, "")
+        .replace(CURSOR_END_MARKER, "")
+
+      const adjustedEndIndex = endIndex - CURSOR_POS_MARKER.length
+
+      return [code, { pos: posIndex, end: adjustedEndIndex }]
+    }
+
+    // Fall back to single cursor marker
     const code = trimmedInput.replace(CURSOR_MARKER, "")
     const position = trimmedInput.indexOf(CURSOR_MARKER)
     if (position === -1) throw new Error("Cursor marker not found in input")
@@ -338,6 +362,25 @@ class MyClass {
 }
       `,
     },
+    {
+      name: "should work with async function declarations",
+      input: `
+type Test = { tag: "a" } | { tag: "b" };
+async function handleAsync(/*cursor*/x: Test) {}
+      `,
+      output: `
+type Test = { tag: "a" } | { tag: "b" };
+async function handleAsync(x: Test) {
+  if (x.tag === "a") {
+    \\
+  } else if (x.tag === "b") {
+    \\
+  } else {
+    x satisfies never;
+  }
+}
+      `,
+    },
   ]
 
   for (const { name, input, output } of [
@@ -428,6 +471,41 @@ const /*cursor*/x: Never = null as any;
 type Test = { tag: "a" } | { tag: "b" };
 const x: Test = {} as Test;
 const y = /*cursor*/x + 1;
+      `,
+    },
+    {
+      name: "should not work with cursor ranges",
+      input: `
+type Test = { tag: "a" } | { tag: "b" };
+const /*cursor pos*/x: Test/*cursor end*/ = {} as Test;
+      `,
+    },
+    {
+      name: "should not work when cursor is outside an identifier",
+      input: `
+type Test = { tag: "a" } | { tag: "b" };
+const x: Test = {} /*cursor*/as Test;
+      `,
+    },
+    {
+      name: "should not work with non-string literal discriminant",
+      input: `
+type Test = { tag: 0 } | { tag: 1 };
+const /*cursor*/x: Test = {} as Test;
+      `,
+    },
+    {
+      name: "should not work with function declarations without body",
+      input: `
+type Test = { tag: "a" } | { tag: "b" };
+declare function handleTest(/*cursor*/x: Test): void;
+      `,
+    },
+    {
+      name: "should not work with partially typed function without body",
+      input: `
+type Test = { tag: "a" } | { tag: "b" };
+function handleTest(/*cursor*/x: Test)
       `,
     },
   ]
@@ -681,6 +759,26 @@ const result = x/*cursor*/ + 1;
 /*cursor*/x
       `,
     },
+    {
+      name: "should not provide exhaustive match completion for non-supported tokens",
+      input: `
+type Test = { tag: "a" } | { tag: "b" }/*cursor*/
+      `,
+    },
+    {
+      name: "should not provide exhaustive match completion for empty files",
+      input: `
+/*cursor*/
+      `,
+    },
+    {
+      name: "should not provide exhaustive match completion for property access on complex expressions",
+      input: `
+type Test = { tag: "a" } | { tag: "b" };
+const x = { y: {} as Test };
+(x.y)./*cursor*/
+      `,
+    },
   ]
 
   // Type narrowing test cases
@@ -729,6 +827,7 @@ if (x.tag !== "c") {
   for (const { name, input, completion, output } of COMPLETION_TEST_CASES) {
     it(name, () => {
       const [inputCode, cursorPosition] = processInput(input)
+      assert(typeof cursorPosition === "number")
       const enhancedService = createLanguageService(inputCode)
       const completions = enhancedService.getCompletionsAtPosition(
         TEST_FILE_NAME,
@@ -807,6 +906,7 @@ if (x.tag !== "c") {
   for (const { name, input } of COMPLETION_NEGATIVE_TEST_CASES) {
     it(name, () => {
       const [inputCode, cursorPosition] = processInput(input)
+      assert(typeof cursorPosition === "number")
       const enhancedService = createLanguageService(inputCode)
       const completions = enhancedService.getCompletionsAtPosition(
         TEST_FILE_NAME,

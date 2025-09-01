@@ -29,7 +29,7 @@ export function init(modules: { typescript: TS }): ts.server.PluginModule {
     /* eslint-enable */
     /* v8 ignore stop -- @preserve */
 
-    function getContext(fileName: string) {
+    function getLSContest(fileName: string) {
       const sourceFile = info.languageService
         .getProgram()
         ?.getSourceFile(fileName)
@@ -56,7 +56,7 @@ export function init(modules: { typescript: TS }): ts.server.PluginModule {
       )
       if (typeof positionOrRange !== "number") return prior
 
-      const { sourceFile, typeChecker } = getContext(fileName)
+      const { sourceFile, typeChecker } = getLSContest(fileName)
 
       const refactorCase = getRefactorCase(
         typescript,
@@ -65,7 +65,7 @@ export function init(modules: { typescript: TS }): ts.server.PluginModule {
       )
       if (refactorCase === undefined) return prior
 
-      const discriminatedUnionContext = getDiscriminatedUnionFullContext(
+      const discriminatedUnionContext = getExhaustiveCaseGenerationContext(
         typescript,
         typeChecker,
         refactorCase.identifier,
@@ -94,6 +94,8 @@ export function init(modules: { typescript: TS }): ts.server.PluginModule {
       actionName,
       preferences,
     ) => {
+      /* v8 ignore start -- @preserve */
+      // We don't care for refactors not involving this action
       if (actionName !== "generateExhaustiveMatch") {
         return info.languageService.getEditsForRefactor(
           fileName,
@@ -104,24 +106,26 @@ export function init(modules: { typescript: TS }): ts.server.PluginModule {
           preferences,
         )
       }
-      if (typeof positionOrRange !== "number") return undefined
-      const { sourceFile, typeChecker } = getContext(fileName)
+      /* v8 ignore stop -- @preserve */
+
+      assert(typeof positionOrRange === "number")
+      const { sourceFile, typeChecker } = getLSContest(fileName)
 
       const refactorCase = getRefactorCase(
         typescript,
         sourceFile,
         positionOrRange,
       )
-      if (refactorCase === undefined) return undefined
+      assert(refactorCase !== undefined)
 
-      const discriminatedUnionContext = getDiscriminatedUnionFullContext(
+      const discriminatedUnionContext = getExhaustiveCaseGenerationContext(
         typescript,
         typeChecker,
         // TODO: We should use the expression itself, not only its symbol name
         // which only works for identifiers
         refactorCase.identifier,
       )
-      if (discriminatedUnionContext === undefined) return undefined
+      assert(discriminatedUnionContext !== undefined)
       const { targetUnion } = discriminatedUnionContext
 
       const ast = createExhaustiveMatchAST(
@@ -156,14 +160,7 @@ export function init(modules: { typescript: TS }): ts.server.PluginModule {
         length: number
       }
       if (refactorCase.tag === "parameter") {
-        const body = refactorCase.node.body
-        if (
-          body === undefined ||
-          typescript.isExpression(body) ||
-          !typescript.isBlock(body)
-        ) {
-          return undefined
-        }
+        const body = refactorCase.body
         newText = "\n" + newText
         replacementSpan = {
           start: body.getStart() + 1,
@@ -214,7 +211,7 @@ export function init(modules: { typescript: TS }): ts.server.PluginModule {
         position,
         options,
       )
-      const { sourceFile, typeChecker } = getContext(fileName)
+      const { sourceFile, typeChecker } = getLSContest(fileName)
 
       const comp = getCompletionCase(typescript, sourceFile, position)
       if (comp === undefined) return prior
@@ -222,13 +219,13 @@ export function init(modules: { typescript: TS }): ts.server.PluginModule {
       const target =
         comp.sub.tag === "identifier" ? comp.sub.node : comp.sub.node.expression
 
-      const discriminatedUnionContext = getDiscriminatedUnionFullContext(
+      const discriminatedUnionContext = getExhaustiveCaseGenerationContext(
         typescript,
         typeChecker,
         target,
       )
       if (discriminatedUnionContext === undefined) return undefined
-      const { targetUnion } = discriminatedUnionContext
+      const { targetUnion, targetSymbol } = discriminatedUnionContext
 
       // Bail out when prop access is not a prefix of the discriminant
       if (
@@ -240,8 +237,6 @@ export function init(modules: { typescript: TS }): ts.server.PluginModule {
 
       // TODO: We should use the expression itself, not only its symbol name
       // which only works for identifiers
-      const targetSymbol = typeChecker.getSymbolAtLocation(target)
-      if (targetSymbol === undefined) return prior
       const ast = createExhaustiveMatchAST(
         typescript,
         targetSymbol.name,
@@ -313,6 +308,7 @@ type RefactorCase =
   | {
       tag: "parameter"
       node: ts.FunctionLikeDeclaration
+      body: ts.FunctionBody
       identifier: ts.Identifier
     }
   | {
@@ -336,8 +332,7 @@ function getRefactorCase(
     return undefined
 
   const parent = identifier.parent
-  if (parent === undefined) return undefined
-
+  assert(parent !== undefined)
   if (typescript.isParameter(parent)) {
     // Get the function that contains this parameter
     const functionNode = parent.parent
@@ -347,10 +342,25 @@ function getRefactorCase(
       typescript.isArrowFunction(functionNode) ||
       typescript.isMethodDeclaration(functionNode)
     ) {
+      // Don't offer refactor for functions without bodies, lambdas or function
+      // declarations
+      if (
+        functionNode.body === undefined ||
+        typescript.isExpression(functionNode.body) ||
+        (typescript.isFunctionDeclaration(functionNode) &&
+          (functionNode.modifiers?.some(
+            (mod) => mod.kind === typescript.SyntaxKind.DeclareKeyword,
+          ) ??
+            false))
+      ) {
+        return undefined
+      }
+
       return {
         tag: "parameter",
         identifier,
         node: functionNode,
+        body: functionNode.body,
       }
     }
   } else if (typescript.isVariableDeclaration(parent)) {
@@ -406,7 +416,7 @@ function getVarCompletionCase(
   if (prevPos < 0) return undefined
 
   const prevToken = getTokenAtPosition(typescript, sourceFile, prevPos)
-  if (prevToken === undefined) return undefined
+  assert(prevToken !== undefined)
 
   if (typescript.isIdentifier(prevToken)) {
     const parent = prevToken.parent
@@ -441,7 +451,7 @@ function getCompletionCase(
   if (varCase === undefined) return undefined
 
   const varCaseParent = varCase.node.parent
-  if (varCaseParent === undefined) return undefined
+  assert(varCaseParent !== undefined)
 
   if (typescript.isIfStatement(varCaseParent)) {
     return {
@@ -460,7 +470,7 @@ function getCompletionCase(
   }
 }
 
-function getDiscriminatedUnionFullContext(
+function getExhaustiveCaseGenerationContext(
   typescript: TS,
   typeChecker: ts.TypeChecker,
   node: ts.Node,
@@ -481,7 +491,7 @@ function getDiscriminatedUnionFullContext(
     targetSymbol,
     typeChecker,
   )
-  if (declarationType === undefined) return undefined
+  assert(declarationType !== undefined)
 
   const declarationUnion = getDiscriminatedUnionFromType(
     typescript,
@@ -489,7 +499,7 @@ function getDiscriminatedUnionFullContext(
     declarationType,
     { preserveSourceOrder: true },
   )
-  if (declarationUnion === undefined) return undefined
+  assert(declarationUnion !== undefined)
 
   const declSortedCases = [...declarationUnion.alternatives]
   const sortedCases = [...targetUnion.alternatives].sort(
@@ -497,6 +507,7 @@ function getDiscriminatedUnionFullContext(
   )
 
   return {
+    targetSymbol,
     targetUnion: {
       ...targetUnion,
       alternatives: new Set(sortedCases),
@@ -577,23 +588,20 @@ function getSourceDeclarationType(
   symbol: ts.Symbol,
   typeChecker: ts.TypeChecker,
 ): ts.Type | undefined {
+  assert(symbol.declarations?.[0])
   // Get the declared type from source for tag ordering purposes
-  if (symbol.declarations && symbol.declarations.length > 0) {
-    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-    const decl = symbol.declarations[0]!
-    if (typescript.isVariableDeclaration(decl) && decl.type) {
-      const declaredType = typeChecker.getTypeFromTypeNode(decl.type)
-      if ((declaredType.flags & typescript.TypeFlags.Union) !== 0) {
-        return declaredType
-      }
-    } else if (typescript.isParameter(decl) && decl.type) {
-      const declaredType = typeChecker.getTypeFromTypeNode(decl.type)
-      if ((declaredType.flags & typescript.TypeFlags.Union) !== 0) {
-        return declaredType
-      }
+  const decl = symbol.declarations[0]
+  let declaredType: ts.Type | undefined
+  if (
+    (typescript.isVariableDeclaration(decl) || typescript.isParameter(decl)) &&
+    decl.type
+  ) {
+    const nodeType = typeChecker.getTypeFromTypeNode(decl.type)
+    if ((nodeType.flags & typescript.TypeFlags.Union) !== 0) {
+      declaredType = nodeType
     }
   }
-  return undefined
+  return declaredType
 }
 
 function createExhaustiveMatchAST(
