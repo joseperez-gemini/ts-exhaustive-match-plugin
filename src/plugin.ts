@@ -1,4 +1,9 @@
-import { getTokenAtPosition, setTSLogger } from "./utils"
+import {
+  getCodeIndentationLevel,
+  getExistingCodeIndentationSpaces,
+  getTokenAtPosition,
+  setTSLogger,
+} from "./utils"
 import type * as ts from "typescript/lib/tsserverlibrary"
 
 export type TS = typeof ts
@@ -46,70 +51,47 @@ export function init(modules: { typescript: TS }): ts.server.PluginModule {
         ?.getSourceFile(fileName)
       if (!sourceFile) return prior
 
-      const start =
-        typeof positionOrRange === "number"
-          ? positionOrRange
-          : positionOrRange.pos
-
-      // Find the identifier at the current position
-      const token = getTokenAtPosition(typescript, sourceFile, start)
-      if (!token) return prior
-
-      // Handle both standalone identifiers and identifiers in declarations
-      let identifier: ts.Identifier | undefined
-
-      if (typescript.isIdentifier(token)) {
-        identifier = token
-      } else if (
-        typescript.isVariableDeclaration(token) &&
-        typescript.isIdentifier(token.name)
-      ) {
-        identifier = token.name
-      } else if (
-        typescript.isParameter(token) &&
-        typescript.isIdentifier(token.name)
-      ) {
-        identifier = token.name
-      } else {
-        // Try to find an identifier in the parent chain
-        let current = token.parent
-        while (current !== undefined && !identifier) {
-          if (
-            typescript.isVariableDeclaration(current) &&
-            typescript.isIdentifier(current.name)
-          ) {
-            identifier = current.name
-            break
-          }
-          if (
-            typescript.isParameter(current) &&
-            typescript.isIdentifier(current.name)
-          ) {
-            identifier = current.name
-            break
-          }
-          current = current.parent
-        }
-      }
-
-      if (!identifier) return prior
-
       const typeChecker = info.languageService.getProgram()?.getTypeChecker()
       if (!typeChecker) return prior
 
-      const symbol = typeChecker.getSymbolAtLocation(identifier)
-      if (!symbol) return prior
+      if (typeof positionOrRange !== "number") return prior
 
-      // Use the narrowed type at the current location for exhaustiveness checking
-      const type = typeChecker.getTypeAtLocation(identifier)
-      if (!isDiscriminatedUnion(type, typeChecker, typescript)) return prior
-
-      const discriminantProperty = findDiscriminantProperty(
-        type,
-        typeChecker,
+      const refactorCase = getRefactorCase(
         typescript,
+        sourceFile,
+        positionOrRange,
       )
-      if (discriminantProperty === null) return prior
+      if (refactorCase === undefined) return prior
+
+      const narrowedTargetType = typeChecker.getTypeAtLocation(
+        refactorCase.identifier,
+      )
+      const targetType = getDiscriminatedUnionFromType(
+        typescript,
+        typeChecker,
+        narrowedTargetType,
+      )
+      if (targetType === undefined) return prior
+
+      const targetSymbol = typeChecker.getSymbolAtLocation(
+        refactorCase.identifier,
+      )
+      if (targetSymbol === undefined) return prior
+
+      const declarationType = getSourceDeclarationType(
+        typescript,
+        targetSymbol,
+        typeChecker,
+      )
+      if (declarationType === undefined) return prior
+
+      const declarationUnion = getDiscriminatedUnionFromType(
+        typescript,
+        typeChecker,
+        declarationType,
+        true, // preserveSourceOrder
+      )
+      if (declarationUnion === undefined) return prior
 
       const refactor: ts.ApplicableRefactorInfo = {
         name: "Generate exhaustive match",
@@ -118,12 +100,10 @@ export function init(modules: { typescript: TS }): ts.server.PluginModule {
           {
             name: "generateExhaustiveMatch",
             description: "Generate exhaustive if-else pattern match",
-            notApplicableReason: undefined,
             kind: "refactor.rewrite.exhaustive-match",
           },
         ],
       }
-
       return [...prior, refactor]
     }
 
@@ -135,10 +115,7 @@ export function init(modules: { typescript: TS }): ts.server.PluginModule {
       actionName,
       preferences,
     ) => {
-      if (
-        refactorName !== "Generate exhaustive match" ||
-        actionName !== "generateExhaustiveMatch"
-      ) {
+      if (actionName !== "generateExhaustiveMatch") {
         return info.languageService.getEditsForRefactor(
           fileName,
           formatOptions,
@@ -154,177 +131,112 @@ export function init(modules: { typescript: TS }): ts.server.PluginModule {
         ?.getSourceFile(fileName)
       if (!sourceFile) return undefined
 
-      const start =
-        typeof positionOrRange === "number"
-          ? positionOrRange
-          : positionOrRange.pos
-
-      // Find the identifier at the current position
-      const token = getTokenAtPosition(typescript, sourceFile, start)
-      if (!token) return undefined
-
-      let identifier: ts.Identifier | undefined
-
-      if (typescript.isIdentifier(token)) {
-        identifier = token
-      } else if (
-        typescript.isVariableDeclaration(token) &&
-        typescript.isIdentifier(token.name)
-      ) {
-        identifier = token.name
-      } else if (
-        typescript.isParameter(token) &&
-        typescript.isIdentifier(token.name)
-      ) {
-        identifier = token.name
-      } else {
-        // Try to find an identifier in the parent chain
-        let current = token.parent
-        while (current !== undefined && !identifier) {
-          if (
-            typescript.isVariableDeclaration(current) &&
-            typescript.isIdentifier(current.name)
-          ) {
-            identifier = current.name
-            break
-          }
-          if (
-            typescript.isParameter(current) &&
-            typescript.isIdentifier(current.name)
-          ) {
-            identifier = current.name
-            break
-          }
-          current = current.parent
-        }
-      }
-
-      if (!identifier) return undefined
-
       const typeChecker = info.languageService.getProgram()?.getTypeChecker()
       if (!typeChecker) return undefined
 
-      const symbol = typeChecker.getSymbolAtLocation(identifier)
-      if (!symbol) return undefined
+      if (typeof positionOrRange !== "number") return undefined
 
-      // Use the narrowed type at the current location for exhaustiveness checking
-      const type = typeChecker.getTypeAtLocation(identifier)
-      if (!isDiscriminatedUnion(type, typeChecker, typescript)) return undefined
-
-      const discriminantProperty = findDiscriminantProperty(
-        type,
-        typeChecker,
-        typescript,
-      )
-      if (discriminantProperty === undefined) return undefined
-
-      // Get source declaration type for tag ordering
-      const sourceDeclarationType = getSourceDeclarationType(
-        typescript,
-        symbol,
-        typeChecker,
-      )
-
-      const newText = generateExhaustiveMatch(
-        identifier.text,
-        type,
-        discriminantProperty,
-        typeChecker,
-        typescript,
-        sourceDeclarationType,
-        sourceFile,
-      )
-
-      // Find the best position to insert the code
-      let insertPosition = identifier.end
-      let replaceLength = 0
-      let needsNewline = false
-      let currentNode: ts.Node = identifier
-
-      // If we're in a variable declaration, insert after the statement
-      while (currentNode.parent !== undefined) {
-        if (typescript.isVariableStatement(currentNode.parent)) {
-          insertPosition = currentNode.parent.end
-          break
-        }
-        if (
-          typescript.isVariableDeclaration(currentNode.parent) &&
-          currentNode.parent.parent !== undefined &&
-          typescript.isVariableDeclarationList(currentNode.parent.parent) &&
-          currentNode.parent.parent.parent !== undefined &&
-          typescript.isVariableStatement(currentNode.parent.parent.parent)
-        ) {
-          insertPosition = currentNode.parent.parent.parent.end
-          break
-        }
-        // For standalone identifiers, replace the entire expression statement
-        if (typescript.isExpressionStatement(currentNode.parent)) {
-          insertPosition = currentNode.parent.getStart()
-          replaceLength = currentNode.parent.getWidth()
-          break
-        }
-        // For function parameters, insert at the beginning of the function body
-        if (
-          typescript.isFunctionDeclaration(currentNode.parent) ||
-          typescript.isFunctionExpression(currentNode.parent) ||
-          typescript.isArrowFunction(currentNode.parent) ||
-          typescript.isMethodDeclaration(currentNode.parent)
-        ) {
-          const func = currentNode.parent
-          if (func.body) {
-            if (typescript.isBlock(func.body)) {
-              // Insert after the opening brace
-              insertPosition = func.body.getStart() + 1
-
-              // Check if function body has content (not just empty {})
-              const bodyText = func.body.getText()
-              const hasContent = bodyText.trim().length > 2 // More than just "{}"
-              if (!hasContent) {
-                // Empty function body {} - add trailing newline
-                needsNewline = true
-              }
-            } else {
-              // Arrow function with expression body - insert before it
-              insertPosition = func.body.getStart()
-            }
-          }
-          break
-        }
-        currentNode = currentNode.parent
-      }
-
-      // Calculate base indentation based on AST block nesting at insertion point
-      let blockDepth = 0
-
-      // Use TypeScript's utility to find the node containing the insertion position
-      const insertionNode = getTokenAtPosition(
+      const refactorCase = getRefactorCase(
         typescript,
         sourceFile,
-        insertPosition,
+        positionOrRange,
       )
-      let contextNode: ts.Node | undefined = insertionNode
+      if (refactorCase === undefined) return undefined
 
-      // Count how many block statements we're nested inside at the insertion point
-      while (contextNode) {
-        if (typescript.isBlock(contextNode)) {
-          blockDepth++
-        }
-        contextNode = contextNode.parent
+      const narrowedTargetType = typeChecker.getTypeAtLocation(
+        refactorCase.identifier,
+      )
+      const targetType = getDiscriminatedUnionFromType(
+        typescript,
+        typeChecker,
+        narrowedTargetType,
+      )
+      if (targetType === undefined) return undefined
+
+      const targetSymbol = typeChecker.getSymbolAtLocation(
+        refactorCase.identifier,
+      )
+      if (targetSymbol === undefined) return undefined
+
+      const declarationType = getSourceDeclarationType(
+        typescript,
+        targetSymbol,
+        typeChecker,
+      )
+      if (declarationType === undefined) return undefined
+
+      const declarationUnion = getDiscriminatedUnionFromType(
+        typescript,
+        typeChecker,
+        declarationType,
+        true, // preserveSourceOrder
+      )
+      if (declarationUnion === undefined) return undefined
+
+      const declSortedCases = [...declarationUnion.alternatives]
+      const sortedCases = [...targetType.alternatives].sort(
+        (a, b) => declSortedCases.indexOf(a) - declSortedCases.indexOf(b),
+      )
+      // TODO: We should use the expression itself, not only its symbol name
+      // which only works for identifiers
+      const ast = createExhaustiveMatchAST(
+        typescript,
+        targetSymbol.name,
+        targetType.discriminant,
+        sortedCases,
+      )
+
+      let newText = printASTWithPlaceholderReplacement(
+        typescript,
+        sourceFile,
+        ast,
+        false,
+        getCodeIndentationLevel(typescript, refactorCase.identifier) +
+          (refactorCase.tag === "parameter" ? 1 : 0),
+        refactorCase.tag === "expressionStatement"
+          ? getExistingCodeIndentationSpaces(
+              typescript,
+              sourceFile,
+              refactorCase.identifier,
+            )
+          : 0,
+      )
+
+      let replacementSpan: {
+        start: number
+        length: number
       }
-
-      // Calculate base indentation: 2 spaces per block level
-      const baseIndent = "  ".repeat(blockDepth)
-
-      // Check if we need a newline based on replacement context
-      if (needsNewline === false) needsNewline = replaceLength === 0
-
-      // Apply base indentation to the AST-generated code
-      const formattedText =
-        (needsNewline ? "\n" : "") +
-        newText
-          .split("\n")
-          .map((line) => (line.length > 0 ? baseIndent + line : ""))
-          .join("\n")
+      if (refactorCase.tag === "parameter") {
+        const body = refactorCase.node.body
+        if (
+          body === undefined ||
+          typescript.isExpression(body) ||
+          !typescript.isBlock(body)
+        ) {
+          return undefined
+        }
+        newText = "\n" + newText
+        replacementSpan = {
+          start: body.getStart() + 1,
+          length: 0,
+        }
+        if (body.getStart() + 2 === body.getEnd()) {
+          newText += "\n"
+        }
+      } else if (refactorCase.tag === "variableDeclaration") {
+        newText = "\n" + newText
+        replacementSpan = {
+          start: refactorCase.node.getEnd() + 1,
+          length: 0,
+        }
+      } else if (refactorCase.tag === "expressionStatement") {
+        replacementSpan = {
+          start: refactorCase.node.getStart(),
+          length: refactorCase.node.getEnd() - refactorCase.node.getStart(),
+        }
+      } else {
+        replacementSpan = refactorCase satisfies never
+      }
 
       return {
         edits: [
@@ -332,14 +244,12 @@ export function init(modules: { typescript: TS }): ts.server.PluginModule {
             fileName,
             textChanges: [
               {
-                span: { start: insertPosition, length: replaceLength },
-                newText: formattedText,
+                span: replacementSpan,
+                newText,
               },
             ],
           },
         ],
-        renameFilename: undefined,
-        renameLocation: undefined,
       }
     }
 
@@ -392,6 +302,7 @@ export function init(modules: { typescript: TS }): ts.server.PluginModule {
         typescript,
         typeChecker,
         declarationType,
+        true, // preserveSourceOrder
       )
       if (declarationUnion === undefined) return prior
 
@@ -413,6 +324,7 @@ export function init(modules: { typescript: TS }): ts.server.PluginModule {
         sourceFile,
         ast,
         true,
+        0,
         0,
       )
       const replacementSpan = {
@@ -485,232 +397,6 @@ function getSourceDeclarationType(
     }
   }
   return undefined
-}
-
-function isDiscriminatedUnion(
-  type: ts.Type,
-  typeChecker: ts.TypeChecker,
-  typescript: TS,
-): boolean {
-  if ((type.flags & typescript.TypeFlags.Union) === 0) return false
-
-  // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
-  const unionType = type as ts.UnionType
-  if (unionType.types.length < 2) return false
-
-  // Check if it's a discriminated union by looking for a common property with literal types
-  const commonProps: Map<string, boolean> = new Map()
-
-  for (let i = 0; i < unionType.types.length; i++) {
-    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-    const subType = unionType.types[i]!
-    const props = typeChecker.getPropertiesOfType(subType)
-
-    if (i === 0) {
-      // Initialize with first type's properties
-      for (const prop of props) {
-        const propType = typeChecker.getTypeOfSymbolAtLocation(
-          prop,
-          // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-          prop.valueDeclaration!,
-        )
-        const isLiteral =
-          (propType.flags & typescript.TypeFlags.StringLiteral) !== 0
-        commonProps.set(prop.getName(), isLiteral)
-      }
-    } else {
-      // Check if other types have the same properties
-      const currentProps = new Set(props.map((p) => p.getName()))
-      for (const [propName] of commonProps) {
-        if (!currentProps.has(propName)) {
-          commonProps.delete(propName)
-        }
-      }
-    }
-  }
-
-  // Return true if there's at least one common property with literal types
-  return Array.from(commonProps.values()).some((isLiteral) => isLiteral)
-}
-
-function findDiscriminantProperty(
-  type: ts.Type,
-  typeChecker: ts.TypeChecker,
-  typescript: TS,
-): string | undefined {
-  if ((type.flags & typescript.TypeFlags.Union) === 0) return undefined
-
-  // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
-  const unionType = type as ts.UnionType
-  const unionTypes = unionType.types
-  if (unionTypes.length === 0) return undefined
-
-  const candidateProps: Map<string, Set<string>> = new Map()
-
-  for (const subType of unionTypes) {
-    const props = typeChecker.getPropertiesOfType(subType)
-    for (const prop of props) {
-      const propName = prop.getName()
-      const propType = typeChecker.getTypeOfSymbolAtLocation(
-        prop,
-        // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-        prop.valueDeclaration!,
-      )
-
-      if ((propType.flags & typescript.TypeFlags.StringLiteral) !== 0) {
-        if (!candidateProps.has(propName)) {
-          candidateProps.set(propName, new Set())
-        }
-        candidateProps
-          .get(propName)
-          // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
-          ?.add((propType as ts.StringLiteralType).value)
-      }
-    }
-  }
-
-  // Find a property that has unique values for each union member
-  for (const [propName, values] of candidateProps) {
-    if (values.size === unionTypes.length) {
-      return propName
-    }
-  }
-
-  // Fallback to common property names
-  const commonNames = ["tag", "type", "kind", "discriminator", "variant"]
-  for (const name of commonNames) {
-    if (candidateProps.has(name)) {
-      return name
-    }
-  }
-
-  // Return the first candidate if any
-  if (candidateProps.size > 0) {
-    return candidateProps.keys().next().value
-  }
-
-  return undefined
-}
-
-function generateExhaustiveMatch(
-  variableName: string,
-  type: ts.Type,
-  discriminantProperty: string,
-  typeChecker: ts.TypeChecker,
-  typescript: TS,
-  sourceDeclarationType?: ts.Type,
-  sourceFile?: ts.SourceFile,
-): string {
-  if ((type.flags & typescript.TypeFlags.Union) === 0) return ""
-
-  // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
-  const unionType = type as ts.UnionType
-  const unionTypes = unionType.types
-
-  // Use source declaration type for ordering if available, otherwise use narrowed type
-  const typeForOrdering =
-    sourceDeclarationType &&
-    (sourceDeclarationType.flags & typescript.TypeFlags.Union) !== 0
-      ? // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
-        (sourceDeclarationType as ts.UnionType)
-      : unionType
-
-  // Collect cases with their source positions for ordering
-  const casesWithPositions: { value: string; position: number }[] = []
-
-  for (const subType of typeForOrdering.types) {
-    const discriminantProp = subType.getProperty(discriminantProperty)
-    if (discriminantProp) {
-      const discriminantType = typeChecker.getTypeOfSymbolAtLocation(
-        discriminantProp,
-        // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-        discriminantProp.valueDeclaration!,
-      )
-
-      if ((discriminantType.flags & typescript.TypeFlags.StringLiteral) !== 0) {
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
-        const literalValue = (discriminantType as ts.StringLiteralType).value
-
-        // Only include this case if it exists in the narrowed type
-        const existsInNarrowedType = unionTypes.some((narrowedSubType) => {
-          const narrowedDiscriminantProp =
-            narrowedSubType.getProperty(discriminantProperty)
-          if (narrowedDiscriminantProp) {
-            const narrowedDiscriminantType =
-              typeChecker.getTypeOfSymbolAtLocation(
-                narrowedDiscriminantProp,
-                // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-                narrowedDiscriminantProp.valueDeclaration!,
-              )
-            if (
-              (narrowedDiscriminantType.flags &
-                typescript.TypeFlags.StringLiteral) !==
-              0
-            ) {
-              return (
-                // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
-                (narrowedDiscriminantType as ts.StringLiteralType).value ===
-                literalValue
-              )
-            }
-          }
-          return false
-        })
-
-        if (existsInNarrowedType) {
-          // Try to get source position from the discriminant property's value declaration
-          let sourcePosition = 0
-          if (discriminantProp.valueDeclaration) {
-            sourcePosition = discriminantProp.valueDeclaration.getStart()
-          }
-
-          casesWithPositions.push({
-            value: literalValue,
-            position: sourcePosition,
-          })
-        }
-      }
-    }
-  }
-
-  // Sort by source position to maintain declaration order
-  casesWithPositions.sort((a, b) => a.position - b.position)
-  const cases = casesWithPositions.map((c) => c.value)
-
-  if (cases.length === 0) return ""
-
-  // Use AST-based generation if sourceFile is provided
-  if (sourceFile) {
-    const astNode = createExhaustiveMatchAST(
-      typescript,
-      variableName,
-      discriminantProperty,
-      cases,
-    )
-    return printASTWithPlaceholderReplacement(
-      typescript,
-      sourceFile,
-      astNode,
-      false,
-      0,
-    )
-  }
-
-  // Fallback to string-based generation (legacy)
-  let result = ""
-  for (let i = 0; i < cases.length; i++) {
-    if (i === 0) {
-      result += `if (${variableName}.${discriminantProperty} === "${cases[i]}") {\n`
-    } else {
-      result += `} else if (${variableName}.${discriminantProperty} === "${cases[i]}") {\n`
-    }
-    result += `  \n`
-  }
-  result += `} else {\n`
-  result += `  ${variableName} satisfies never;\n`
-  result += `}`
-
-  return result
 }
 
 type ExprCompletionCase =
@@ -797,6 +483,73 @@ function getCompletionCase(
   }
 }
 
+type RefactorCase =
+  | {
+      tag: "parameter"
+      node: ts.FunctionLikeDeclaration
+      identifier: ts.Identifier
+    }
+  | {
+      tag: "variableDeclaration"
+      node: ts.VariableStatement
+      identifier: ts.Identifier
+    }
+  | {
+      tag: "expressionStatement"
+      node: ts.ExpressionStatement
+      identifier: ts.Identifier
+    }
+
+function getRefactorCase(
+  typescript: TS,
+  sourceFile: ts.SourceFile,
+  position: number,
+): RefactorCase | undefined {
+  const identifier = getTokenAtPosition(typescript, sourceFile, position)
+  if (identifier === undefined || !typescript.isIdentifier(identifier))
+    return undefined
+
+  const parent = identifier.parent
+  if (parent === undefined) return undefined
+
+  if (typescript.isParameter(parent)) {
+    // Get the function that contains this parameter
+    const functionNode = parent.parent
+    if (
+      typescript.isFunctionDeclaration(functionNode) ||
+      typescript.isFunctionExpression(functionNode) ||
+      typescript.isArrowFunction(functionNode) ||
+      typescript.isMethodDeclaration(functionNode)
+    ) {
+      return {
+        tag: "parameter",
+        identifier,
+        node: functionNode,
+      }
+    }
+  } else if (typescript.isVariableDeclaration(parent)) {
+    const varDeclList = parent.parent
+    if (typescript.isVariableDeclarationList(varDeclList)) {
+      const varStatement = varDeclList.parent
+      if (typescript.isVariableStatement(varStatement)) {
+        return {
+          tag: "variableDeclaration",
+          identifier,
+          node: varStatement,
+        }
+      }
+    }
+  } else if (typescript.isExpressionStatement(parent)) {
+    return {
+      tag: "expressionStatement",
+      identifier,
+      node: parent,
+    }
+  }
+
+  return undefined
+}
+
 function isUnionType(typescript: TS, type: ts.Type): type is ts.UnionType {
   return (type.flags & typescript.TypeFlags.Union) !== 0
 }
@@ -820,10 +573,11 @@ function getDiscriminatedUnionFromType(
   typescript: TS,
   typeChecker: ts.TypeChecker,
   type: ts.Type,
+  preserveSourceOrder = false,
 ): DiscriminatedUnion | undefined {
   if (!isUnionType(typescript, type)) return
 
-  const alternatives: Set<string> = new Set()
+  const alternativesWithPositions: { value: string; position: number }[] = []
 
   // TODO: Auto-detect discriminant name
   for (const subtype of type.types) {
@@ -833,11 +587,29 @@ function getDiscriminatedUnionFromType(
       if (prop.name !== "tag") continue
       const propType = typeChecker.getTypeOfSymbol(prop)
       if (!isStringLiteral(typescript, propType)) return
-      alternatives.add(propType.value)
+
+      // Get source position if needed for ordering
+      let position = 0
+      if (preserveSourceOrder && prop.valueDeclaration) {
+        position = prop.valueDeclaration.getStart()
+      }
+
+      alternativesWithPositions.push({
+        value: propType.value,
+        position,
+      })
       foundDiscriminant = true
     }
     if (!foundDiscriminant) return
   }
+
+  // Sort by source position if requested
+  if (preserveSourceOrder) {
+    alternativesWithPositions.sort((a, b) => a.position - b.position)
+  }
+
+  // Convert to Set maintaining order
+  const alternatives = new Set(alternativesWithPositions.map((a) => a.value))
 
   return {
     discriminant: "tag",
@@ -912,6 +684,7 @@ function printASTWithPlaceholderReplacement(
   astNode: ts.Node,
   isSnippet: boolean,
   allLinesIndent: number,
+  existingIndentFirstLine: number,
 ): string {
   const printer = typescript.createPrinter({
     newLine: typescript.NewLineKind.LineFeed,
@@ -947,11 +720,24 @@ function printASTWithPlaceholderReplacement(
   formattedCode = formattedCode.replace(/}\s*\n(\s*)else \{/g, "} else {")
 
   // Apply base indentation to all lines at the end
-  if (allLinesIndent > 0) {
+  if (allLinesIndent > 0 || existingIndentFirstLine > 0) {
     const baseIndent = "  ".repeat(allLinesIndent)
+
     formattedCode = formattedCode
       .split("\n")
-      .map((line) => (line.length > 0 ? baseIndent + line : line))
+      .map((line, index) => {
+        if (line.length === 0) return line
+        // For the first line, subtract the existing indent since it's already there
+        if (index === 0 && existingIndentFirstLine > 0) {
+          const spacesToAdd = Math.max(
+            0,
+            allLinesIndent * 2 - existingIndentFirstLine,
+          )
+          return " ".repeat(spacesToAdd) + line
+        }
+        // Use regular indentation for other lines
+        return baseIndent + line
+      })
       .join("\n")
   }
 

@@ -61,7 +61,6 @@ describe("TypeScript Exhaustive Match Plugin", () => {
       input: `
 type Test = { tag: "a" } | { tag: "b" };
 const /*cursor*/x: Test = {} as Test;
-const other = 0
       `,
       output: `
 type Test = { tag: "a" } | { tag: "b" };
@@ -73,7 +72,6 @@ if (x.tag === "a") {
 } else {
   x satisfies never;
 }
-const other = 0
       `,
     },
     {
@@ -711,9 +709,6 @@ if (x.tag !== "c") {
           inputCode.slice(0, replacement.start) +
           indentedSnippet +
           inputCode.slice(replacement.start + replacement.length)
-
-        console.log("DEBUG: expectedCode", resultCode)
-        console.log("DEBUG: resultCode", resultCode)
 
         const expectedCode = output.replace(/ \\\n/g, " \n")
         expect(resultCode.trim()).toBe(expectedCode.trim())
