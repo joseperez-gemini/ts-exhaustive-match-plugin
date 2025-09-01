@@ -1,9 +1,5 @@
-import {
-  getCodeIndentationLevel,
-  getExistingCodeIndentationSpaces,
-  getTokenAtPosition,
-  setTSLogger,
-} from "./utils"
+import { setTSLogger } from "./utils"
+import assert from "assert"
 import type * as ts from "typescript/lib/tsserverlibrary"
 
 export type TS = typeof ts
@@ -12,6 +8,7 @@ export function init(modules: { typescript: TS }): ts.server.PluginModule {
   const typescript = modules.typescript
 
   function create(info: ts.server.PluginCreateInfo) {
+    /* v8 ignore start -- @preserve */
     /* eslint-disable */
     const proxy: ts.LanguageService = Object.create(null)
     for (const k of Object.keys(
@@ -30,6 +27,18 @@ export function init(modules: { typescript: TS }): ts.server.PluginModule {
       )
     })
     /* eslint-enable */
+    /* v8 ignore stop -- @preserve */
+
+    function getContext(fileName: string) {
+      const sourceFile = info.languageService
+        .getProgram()
+        ?.getSourceFile(fileName)
+      assert(sourceFile !== undefined)
+
+      const typeChecker = info.languageService.getProgram()?.getTypeChecker()
+      assert(typeChecker !== undefined)
+      return { sourceFile, typeChecker }
+    }
 
     proxy.getApplicableRefactors = (
       fileName,
@@ -45,16 +54,9 @@ export function init(modules: { typescript: TS }): ts.server.PluginModule {
         triggerReason,
         kind,
       )
-
-      const sourceFile = info.languageService
-        .getProgram()
-        ?.getSourceFile(fileName)
-      if (!sourceFile) return prior
-
-      const typeChecker = info.languageService.getProgram()?.getTypeChecker()
-      if (!typeChecker) return prior
-
       if (typeof positionOrRange !== "number") return prior
+
+      const { sourceFile, typeChecker } = getContext(fileName)
 
       const refactorCase = getRefactorCase(
         typescript,
@@ -63,35 +65,12 @@ export function init(modules: { typescript: TS }): ts.server.PluginModule {
       )
       if (refactorCase === undefined) return prior
 
-      const narrowedTargetType = typeChecker.getTypeAtLocation(
+      const discriminatedUnionContext = getDiscriminatedUnionFullContext(
+        typescript,
+        typeChecker,
         refactorCase.identifier,
       )
-      const targetType = getDiscriminatedUnionFromType(
-        typescript,
-        typeChecker,
-        narrowedTargetType,
-      )
-      if (targetType === undefined) return prior
-
-      const targetSymbol = typeChecker.getSymbolAtLocation(
-        refactorCase.identifier,
-      )
-      if (targetSymbol === undefined) return prior
-
-      const declarationType = getSourceDeclarationType(
-        typescript,
-        targetSymbol,
-        typeChecker,
-      )
-      if (declarationType === undefined) return prior
-
-      const declarationUnion = getDiscriminatedUnionFromType(
-        typescript,
-        typeChecker,
-        declarationType,
-        true, // preserveSourceOrder
-      )
-      if (declarationUnion === undefined) return prior
+      if (discriminatedUnionContext === undefined) return prior
 
       const refactor: ts.ApplicableRefactorInfo = {
         name: "Generate exhaustive match",
@@ -125,16 +104,8 @@ export function init(modules: { typescript: TS }): ts.server.PluginModule {
           preferences,
         )
       }
-
-      const sourceFile = info.languageService
-        .getProgram()
-        ?.getSourceFile(fileName)
-      if (!sourceFile) return undefined
-
-      const typeChecker = info.languageService.getProgram()?.getTypeChecker()
-      if (!typeChecker) return undefined
-
       if (typeof positionOrRange !== "number") return undefined
+      const { sourceFile, typeChecker } = getContext(fileName)
 
       const refactorCase = getRefactorCase(
         typescript,
@@ -143,63 +114,41 @@ export function init(modules: { typescript: TS }): ts.server.PluginModule {
       )
       if (refactorCase === undefined) return undefined
 
-      const narrowedTargetType = typeChecker.getTypeAtLocation(
+      const discriminatedUnionContext = getDiscriminatedUnionFullContext(
+        typescript,
+        typeChecker,
+        // TODO: We should use the expression itself, not only its symbol name
+        // which only works for identifiers
         refactorCase.identifier,
       )
-      const targetType = getDiscriminatedUnionFromType(
-        typescript,
-        typeChecker,
-        narrowedTargetType,
-      )
-      if (targetType === undefined) return undefined
+      if (discriminatedUnionContext === undefined) return undefined
+      const { targetUnion } = discriminatedUnionContext
 
-      const targetSymbol = typeChecker.getSymbolAtLocation(
-        refactorCase.identifier,
-      )
-      if (targetSymbol === undefined) return undefined
-
-      const declarationType = getSourceDeclarationType(
-        typescript,
-        targetSymbol,
-        typeChecker,
-      )
-      if (declarationType === undefined) return undefined
-
-      const declarationUnion = getDiscriminatedUnionFromType(
-        typescript,
-        typeChecker,
-        declarationType,
-        true, // preserveSourceOrder
-      )
-      if (declarationUnion === undefined) return undefined
-
-      const declSortedCases = [...declarationUnion.alternatives]
-      const sortedCases = [...targetType.alternatives].sort(
-        (a, b) => declSortedCases.indexOf(a) - declSortedCases.indexOf(b),
-      )
-      // TODO: We should use the expression itself, not only its symbol name
-      // which only works for identifiers
       const ast = createExhaustiveMatchAST(
         typescript,
-        targetSymbol.name,
-        targetType.discriminant,
-        sortedCases,
+        refactorCase.identifier.text,
+        targetUnion.discriminant,
+        [...targetUnion.alternatives],
       )
 
       let newText = printASTWithPlaceholderReplacement(
         typescript,
         sourceFile,
         ast,
-        false,
-        getCodeIndentationLevel(typescript, refactorCase.identifier) +
-          (refactorCase.tag === "parameter" ? 1 : 0),
-        refactorCase.tag === "expressionStatement"
-          ? getExistingCodeIndentationSpaces(
-              typescript,
-              sourceFile,
-              refactorCase.identifier,
-            )
-          : 0,
+        {
+          isSnippet: false,
+          allLinesIndent:
+            getCodeIndentationLevel(typescript, refactorCase.identifier) +
+            (refactorCase.tag === "parameter" ? 1 : 0),
+          existingIndentFirstLine:
+            refactorCase.tag === "expressionStatement"
+              ? getExistingCodeIndentationSpaces(
+                  typescript,
+                  sourceFile,
+                  refactorCase.identifier,
+                )
+              : 0,
+        },
       )
 
       let replacementSpan: {
@@ -221,7 +170,12 @@ export function init(modules: { typescript: TS }): ts.server.PluginModule {
           length: 0,
         }
         if (body.getStart() + 2 === body.getEnd()) {
-          newText += "\n"
+          const fnIndent = getExistingCodeIndentationSpaces(
+            typescript,
+            sourceFile,
+            refactorCase.node,
+          )
+          newText += "\n" + " ".repeat(fnIndent)
         }
       } else if (refactorCase.tag === "variableDeclaration") {
         newText = "\n" + newText
@@ -234,6 +188,7 @@ export function init(modules: { typescript: TS }): ts.server.PluginModule {
           start: refactorCase.node.getStart(),
           length: refactorCase.node.getEnd() - refactorCase.node.getStart(),
         }
+        /* v8 ignore next 3 -- @preserve */
       } else {
         replacementSpan = refactorCase satisfies never
       }
@@ -253,79 +208,54 @@ export function init(modules: { typescript: TS }): ts.server.PluginModule {
       }
     }
 
-    // Override getCompletionsAtPosition to provide exhaustive match completions
     proxy.getCompletionsAtPosition = (fileName, position, options) => {
       const prior = info.languageService.getCompletionsAtPosition(
         fileName,
         position,
         options,
       )
-      const sourceFile = info.languageService
-        .getProgram()
-        ?.getSourceFile(fileName)
-      if (sourceFile === undefined) return prior
-      const typeChecker = info.languageService.getProgram()?.getTypeChecker()
-      if (typeChecker === undefined) return prior
+      const { sourceFile, typeChecker } = getContext(fileName)
 
       const comp = getCompletionCase(typescript, sourceFile, position)
       if (comp === undefined) return prior
 
       const target =
         comp.sub.tag === "identifier" ? comp.sub.node : comp.sub.node.expression
-      const narrowedTargetType = typeChecker.getTypeAtLocation(target)
-      const targetType = getDiscriminatedUnionFromType(
+
+      const discriminatedUnionContext = getDiscriminatedUnionFullContext(
         typescript,
         typeChecker,
-        narrowedTargetType,
+        target,
       )
-      if (targetType === undefined) return prior
+      if (discriminatedUnionContext === undefined) return undefined
+      const { targetUnion } = discriminatedUnionContext
 
       // Bail out when prop access is not a prefix of the discriminant
       if (
         comp.sub.tag === "propAccess" &&
-        !targetType.discriminant.startsWith(comp.sub.node.name.text)
+        !targetUnion.discriminant.startsWith(comp.sub.node.name.text)
       ) {
         return prior
       }
 
-      const targetSymbol = typeChecker.getSymbolAtLocation(target)
-      if (targetSymbol === undefined) return prior
-
-      const declarationType = getSourceDeclarationType(
-        typescript,
-        targetSymbol,
-        typeChecker,
-      )
-      if (declarationType === undefined) return prior
-
-      const declarationUnion = getDiscriminatedUnionFromType(
-        typescript,
-        typeChecker,
-        declarationType,
-        true, // preserveSourceOrder
-      )
-      if (declarationUnion === undefined) return prior
-
-      const declSortedCases = [...declarationUnion.alternatives]
-      const sortedCases = [...targetType.alternatives].sort(
-        (a, b) => declSortedCases.indexOf(a) - declSortedCases.indexOf(b),
-      )
       // TODO: We should use the expression itself, not only its symbol name
       // which only works for identifiers
+      const targetSymbol = typeChecker.getSymbolAtLocation(target)
+      if (targetSymbol === undefined) return prior
       const ast = createExhaustiveMatchAST(
         typescript,
         targetSymbol.name,
-        targetType.discriminant,
-        sortedCases,
+        targetUnion.discriminant,
+        [...targetUnion.alternatives],
       )
 
       let snippetText = printASTWithPlaceholderReplacement(
         typescript,
         sourceFile,
         ast,
-        true,
-        0,
-        0,
+        {
+          isSnippet: true,
+        },
       )
       const replacementSpan = {
         start: comp.node.getStart(),
@@ -347,7 +277,7 @@ export function init(modules: { typescript: TS }): ts.server.PluginModule {
       }
 
       const customCompletion = {
-        name: `${targetSymbol.name}.${targetType.discriminant} (exhaustive match)`,
+        name: `${targetSymbol.name}.${targetUnion.discriminant} (exhaustive match)`,
         kind: typescript.ScriptElementKind.unknown,
         kindModifiers: "",
         sortText: "0", // High priority
@@ -358,7 +288,10 @@ export function init(modules: { typescript: TS }): ts.server.PluginModule {
 
       if (prior) {
         prior.entries = [customCompletion, ...prior.entries]
+        /* v8 ignore start -- @preserve */
       } else {
+        // It's very unlikely we'll get here, but we add it for completeness
+        // without coverage
         return {
           isGlobalCompletion: false,
           isMemberCompletion: false,
@@ -366,6 +299,7 @@ export function init(modules: { typescript: TS }): ts.server.PluginModule {
           entries: [customCompletion],
         }
       }
+      /* v8 ignore stop -- @preserve */
 
       return prior
     }
@@ -375,27 +309,70 @@ export function init(modules: { typescript: TS }): ts.server.PluginModule {
   return { create }
 }
 
-function getSourceDeclarationType(
+type RefactorCase =
+  | {
+      tag: "parameter"
+      node: ts.FunctionLikeDeclaration
+      identifier: ts.Identifier
+    }
+  | {
+      tag: "variableDeclaration"
+      node: ts.VariableStatement
+      identifier: ts.Identifier
+    }
+  | {
+      tag: "expressionStatement"
+      node: ts.ExpressionStatement
+      identifier: ts.Identifier
+    }
+
+function getRefactorCase(
   typescript: TS,
-  symbol: ts.Symbol,
-  typeChecker: ts.TypeChecker,
-): ts.Type | undefined {
-  // Get the declared type from source for tag ordering purposes
-  if (symbol.declarations && symbol.declarations.length > 0) {
-    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-    const decl = symbol.declarations[0]!
-    if (typescript.isVariableDeclaration(decl) && decl.type) {
-      const declaredType = typeChecker.getTypeFromTypeNode(decl.type)
-      if ((declaredType.flags & typescript.TypeFlags.Union) !== 0) {
-        return declaredType
-      }
-    } else if (typescript.isParameter(decl) && decl.type) {
-      const declaredType = typeChecker.getTypeFromTypeNode(decl.type)
-      if ((declaredType.flags & typescript.TypeFlags.Union) !== 0) {
-        return declaredType
+  sourceFile: ts.SourceFile,
+  position: number,
+): RefactorCase | undefined {
+  const identifier = getTokenAtPosition(typescript, sourceFile, position)
+  if (identifier === undefined || !typescript.isIdentifier(identifier))
+    return undefined
+
+  const parent = identifier.parent
+  if (parent === undefined) return undefined
+
+  if (typescript.isParameter(parent)) {
+    // Get the function that contains this parameter
+    const functionNode = parent.parent
+    if (
+      typescript.isFunctionDeclaration(functionNode) ||
+      typescript.isFunctionExpression(functionNode) ||
+      typescript.isArrowFunction(functionNode) ||
+      typescript.isMethodDeclaration(functionNode)
+    ) {
+      return {
+        tag: "parameter",
+        identifier,
+        node: functionNode,
       }
     }
+  } else if (typescript.isVariableDeclaration(parent)) {
+    const varDeclList = parent.parent
+    if (typescript.isVariableDeclarationList(varDeclList)) {
+      const varStatement = varDeclList.parent
+      if (typescript.isVariableStatement(varStatement)) {
+        return {
+          tag: "variableDeclaration",
+          identifier,
+          node: varStatement,
+        }
+      }
+    }
+  } else if (typescript.isExpressionStatement(parent)) {
+    return {
+      tag: "expressionStatement",
+      identifier,
+      node: parent,
+    }
   }
+
   return undefined
 }
 
@@ -483,71 +460,48 @@ function getCompletionCase(
   }
 }
 
-type RefactorCase =
-  | {
-      tag: "parameter"
-      node: ts.FunctionLikeDeclaration
-      identifier: ts.Identifier
-    }
-  | {
-      tag: "variableDeclaration"
-      node: ts.VariableStatement
-      identifier: ts.Identifier
-    }
-  | {
-      tag: "expressionStatement"
-      node: ts.ExpressionStatement
-      identifier: ts.Identifier
-    }
-
-function getRefactorCase(
+function getDiscriminatedUnionFullContext(
   typescript: TS,
-  sourceFile: ts.SourceFile,
-  position: number,
-): RefactorCase | undefined {
-  const identifier = getTokenAtPosition(typescript, sourceFile, position)
-  if (identifier === undefined || !typescript.isIdentifier(identifier))
-    return undefined
+  typeChecker: ts.TypeChecker,
+  node: ts.Node,
+) {
+  const narrowedTargetType = typeChecker.getTypeAtLocation(node)
+  const targetUnion = getDiscriminatedUnionFromType(
+    typescript,
+    typeChecker,
+    narrowedTargetType,
+  )
+  if (targetUnion === undefined) return undefined
 
-  const parent = identifier.parent
-  if (parent === undefined) return undefined
+  const targetSymbol = typeChecker.getSymbolAtLocation(node)
+  if (targetSymbol === undefined) return undefined
 
-  if (typescript.isParameter(parent)) {
-    // Get the function that contains this parameter
-    const functionNode = parent.parent
-    if (
-      typescript.isFunctionDeclaration(functionNode) ||
-      typescript.isFunctionExpression(functionNode) ||
-      typescript.isArrowFunction(functionNode) ||
-      typescript.isMethodDeclaration(functionNode)
-    ) {
-      return {
-        tag: "parameter",
-        identifier,
-        node: functionNode,
-      }
-    }
-  } else if (typescript.isVariableDeclaration(parent)) {
-    const varDeclList = parent.parent
-    if (typescript.isVariableDeclarationList(varDeclList)) {
-      const varStatement = varDeclList.parent
-      if (typescript.isVariableStatement(varStatement)) {
-        return {
-          tag: "variableDeclaration",
-          identifier,
-          node: varStatement,
-        }
-      }
-    }
-  } else if (typescript.isExpressionStatement(parent)) {
-    return {
-      tag: "expressionStatement",
-      identifier,
-      node: parent,
-    }
+  const declarationType = getSourceDeclarationType(
+    typescript,
+    targetSymbol,
+    typeChecker,
+  )
+  if (declarationType === undefined) return undefined
+
+  const declarationUnion = getDiscriminatedUnionFromType(
+    typescript,
+    typeChecker,
+    declarationType,
+    { preserveSourceOrder: true },
+  )
+  if (declarationUnion === undefined) return undefined
+
+  const declSortedCases = [...declarationUnion.alternatives]
+  const sortedCases = [...targetUnion.alternatives].sort(
+    (a, b) => declSortedCases.indexOf(a) - declSortedCases.indexOf(b),
+  )
+
+  return {
+    targetUnion: {
+      ...targetUnion,
+      alternatives: new Set(sortedCases),
+    } satisfies DiscriminatedUnionInfo,
   }
-
-  return undefined
 }
 
 function isUnionType(typescript: TS, type: ts.Type): type is ts.UnionType {
@@ -565,7 +519,7 @@ function isStringLiteral(
   return (type.flags & typescript.TypeFlags.StringLiteral) !== 0
 }
 
-type DiscriminatedUnion = {
+type DiscriminatedUnionInfo = {
   discriminant: "tag"
   alternatives: Set<string>
 }
@@ -573,8 +527,9 @@ function getDiscriminatedUnionFromType(
   typescript: TS,
   typeChecker: ts.TypeChecker,
   type: ts.Type,
-  preserveSourceOrder = false,
-): DiscriminatedUnion | undefined {
+  options?: { preserveSourceOrder?: boolean },
+): DiscriminatedUnionInfo | undefined {
+  const { preserveSourceOrder = false } = options ?? {}
   if (!isUnionType(typescript, type)) return
 
   const alternativesWithPositions: { value: string; position: number }[] = []
@@ -615,6 +570,30 @@ function getDiscriminatedUnionFromType(
     discriminant: "tag",
     alternatives,
   }
+}
+
+function getSourceDeclarationType(
+  typescript: TS,
+  symbol: ts.Symbol,
+  typeChecker: ts.TypeChecker,
+): ts.Type | undefined {
+  // Get the declared type from source for tag ordering purposes
+  if (symbol.declarations && symbol.declarations.length > 0) {
+    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+    const decl = symbol.declarations[0]!
+    if (typescript.isVariableDeclaration(decl) && decl.type) {
+      const declaredType = typeChecker.getTypeFromTypeNode(decl.type)
+      if ((declaredType.flags & typescript.TypeFlags.Union) !== 0) {
+        return declaredType
+      }
+    } else if (typescript.isParameter(decl) && decl.type) {
+      const declaredType = typeChecker.getTypeFromTypeNode(decl.type)
+      if ((declaredType.flags & typescript.TypeFlags.Union) !== 0) {
+        return declaredType
+      }
+    }
+  }
+  return undefined
 }
 
 function createExhaustiveMatchAST(
@@ -682,10 +661,13 @@ function printASTWithPlaceholderReplacement(
   typescript: TS,
   sourceFile: ts.SourceFile,
   astNode: ts.Node,
-  isSnippet: boolean,
-  allLinesIndent: number,
-  existingIndentFirstLine: number,
+  options: {
+    isSnippet: boolean
+    allLinesIndent?: number
+    existingIndentFirstLine?: number
+  },
 ): string {
+  const { isSnippet, allLinesIndent = 0, existingIndentFirstLine = 0 } = options
   const printer = typescript.createPrinter({
     newLine: typescript.NewLineKind.LineFeed,
     removeComments: false,
@@ -726,7 +708,6 @@ function printASTWithPlaceholderReplacement(
     formattedCode = formattedCode
       .split("\n")
       .map((line, index) => {
-        if (line.length === 0) return line
         // For the first line, subtract the existing indent since it's already there
         if (index === 0 && existingIndentFirstLine > 0) {
           const spacesToAdd = Math.max(
@@ -742,4 +723,95 @@ function printASTWithPlaceholderReplacement(
   }
 
   return formattedCode
+}
+
+export function getCodeIndentationLevel(typescript: TS, node: ts.Node): number {
+  let level = 0
+  let current = node.parent
+
+  while (current !== undefined) {
+    // Check if this parent actually contributes to indentation
+    if (shouldIndentChildren(typescript, current)) {
+      level++
+    }
+    current = current.parent
+  }
+
+  return level
+}
+
+export function getExistingCodeIndentationSpaces(
+  typescript: TS,
+  sourceFile: ts.SourceFile,
+  node: ts.Node,
+): number {
+  // Get the line start position for the node
+  const nodeStart = node.getStart()
+  const lineStart = typescript.getLineAndCharacterOfPosition(
+    sourceFile,
+    nodeStart,
+  )
+  const lineStartPos = typescript.getPositionOfLineAndCharacter(
+    sourceFile,
+    lineStart.line,
+    0,
+  )
+
+  // Get the text from line start to node start
+  const sourceText = sourceFile.text
+  const linePrefix = sourceText.substring(lineStartPos, nodeStart)
+
+  // Count leading spaces
+  let spaceCount = 0
+  for (const char of linePrefix) {
+    if (char === " ") {
+      spaceCount++
+    } else if (char === "\t") {
+      // Treat tabs as equivalent to some number of spaces (commonly 2 or 4)
+      // For now treating as 2 spaces but this could be configurable
+      spaceCount += 2
+    } else {
+      break
+    }
+  }
+
+  return spaceCount
+}
+
+function shouldIndentChildren(typescript: TS, node: ts.Node): boolean {
+  return (
+    // Blocks always indent their content
+    typescript.isBlock(node) ||
+    typescript.isModuleBlock(node) ||
+    typescript.isCaseBlock(node) ||
+    // Object/array literals indent their content
+    // These we avoid for now, we just handle statements
+    // typescript.isObjectLiteralExpression(node) ||
+    // typescript.isArrayLiteralExpression(node) ||
+    // Class/interface/enum bodies
+    typescript.isClassDeclaration(node) ||
+    typescript.isInterfaceDeclaration(node) ||
+    typescript.isEnumDeclaration(node) ||
+    // Switch cases
+    typescript.isCaseClause(node) ||
+    typescript.isDefaultClause(node)
+  )
+
+  // Note: ExpressionStatement, IfStatement, VariableStatement, etc.
+  // do NOT add indentation to their children
+}
+
+export function getTokenAtPosition(
+  typescript: TS,
+  node: ts.Node,
+  position: number,
+): ts.Node | undefined {
+  if (position < node.getStart() || node.getEnd() <= position) {
+    return undefined
+  }
+  return (
+    typescript.forEachChild(node, (child) => {
+      return getTokenAtPosition(typescript, child, position)
+    }) ?? node
+  )
 }

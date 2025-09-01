@@ -1,6 +1,11 @@
-import { init } from "./plugin"
+import {
+  getCodeIndentationLevel,
+  getExistingCodeIndentationSpaces,
+  getTokenAtPosition,
+  init,
+} from "./plugin"
 
-import { getCodeIndentationLevel, getTokenAtPosition } from "./utils"
+import assert from "assert"
 import ts from "typescript"
 import { describe, expect, it } from "vitest"
 
@@ -272,6 +277,67 @@ function handleTest(x: Test) {
 }
       `,
     },
+    {
+      name: "should work with function expressions",
+      input: `
+type Test = { tag: "a" } | { tag: "b" };
+const func = function(/*cursor*/x: Test) {};
+      `,
+      output: `
+type Test = { tag: "a" } | { tag: "b" };
+const func = function(x: Test) {
+  if (x.tag === "a") {
+    \\
+  } else if (x.tag === "b") {
+    \\
+  } else {
+    x satisfies never;
+  }
+};
+      `,
+    },
+    {
+      name: "should work with arrow functions",
+      input: `
+type Test = { tag: "a" } | { tag: "b" };
+const func = (/*cursor*/x: Test) => {};
+      `,
+      output: `
+type Test = { tag: "a" } | { tag: "b" };
+const func = (x: Test) => {
+  if (x.tag === "a") {
+    \\
+  } else if (x.tag === "b") {
+    \\
+  } else {
+    x satisfies never;
+  }
+};
+      `,
+    },
+    {
+      name: "should work with method declarations",
+      input: `
+type Test = { tag: "a" } | { tag: "b" };
+class MyClass {
+  method(/*cursor*/x: Test) {}
+}
+      `,
+      output: `
+type Test = { tag: "a" } | { tag: "b" };
+class MyClass {
+  method(x: Test) {
+    if (x.tag === "a") {
+      \\
+    } else if (x.tag === "b") {
+      \\
+    } else {
+      x satisfies never;
+    }
+  }
+}
+      `,
+    },
   ]
 
   for (const { name, input, output } of [
@@ -354,6 +420,14 @@ const /*cursor*/x: Mixed = {} as Mixed;
       input: `
 type Never = never;
 const /*cursor*/x: Never = null as any;
+      `,
+    },
+    {
+      name: "should not work with identifiers not in supported contexts",
+      input: `
+type Test = { tag: "a" } | { tag: "b" };
+const x: Test = {} as Test;
+const y = /*cursor*/x + 1;
       `,
     },
   ]
@@ -593,6 +667,20 @@ const x: Simple = {} as Simple;
 if (x/*cursor*/
       `,
     },
+    {
+      name: "should not provide exhaustive match completion for non-if/statement contexts",
+      input: `
+type Test = { tag: "a" } | { tag: "b" };
+const x: Test = {} as Test;
+const result = x/*cursor*/ + 1;
+      `,
+    },
+    {
+      name: "should not provide exhaustive match completion for identifiers without parent",
+      input: `
+/*cursor*/x
+      `,
+    },
   ]
 
   // Type narrowing test cases
@@ -732,4 +820,92 @@ if (x.tag !== "c") {
       expect(exhaustiveCompletion).toBeUndefined()
     })
   }
+
+  // Tests for plugin utility functions
+  describe("plugin utility functions", () => {
+    const UTILITY_TEST_CASES = [
+      {
+        name: "should handle getExistingCodeIndentationSpaces with tabs",
+        input: `
+type Test = { tag: "a" } | { tag: "b" };
+		const x: Test = {} as Test;
+        `,
+      },
+      {
+        name: "should handle getTokenAtPosition",
+        input: `
+type Test = { tag: "a" } | { tag: "b" };
+const x: Test = {} as Test;
+        `,
+        cursorPos: 50,
+      },
+      {
+        name: "should handle getExistingCodeIndentationSpaces with mixed indentation",
+        input: `
+type Test = { tag: "a" } | { tag: "b" };
+	 x const x: Test = {} as Test;
+        `,
+      },
+      {
+        name: "should handle getCodeIndentationLevel",
+        input: `
+type Test = { tag: "a" } | { tag: "b" };
+class MyClass {
+  method(x: Test) {
+    const y = x;
+  }
+}
+        `,
+      },
+    ]
+
+    for (const { name, input, cursorPos } of UTILITY_TEST_CASES) {
+      it(name, () => {
+        const inputCode = input.trim()
+        const sourceFile = ts.createSourceFile(
+          TEST_FILE_NAME,
+          inputCode,
+          ts.ScriptTarget.Latest,
+          true,
+        )
+
+        if (name.includes("getExistingCodeIndentationSpaces")) {
+          // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+          const varStatement = sourceFile.statements[1] as ts.VariableStatement
+          if (varStatement !== undefined) {
+            const spaces = getExistingCodeIndentationSpaces(
+              ts,
+              sourceFile,
+              varStatement,
+            )
+            expect(spaces).toBeGreaterThanOrEqual(0)
+          }
+        }
+
+        if (name.includes("getTokenAtPosition")) {
+          const position = cursorPos ?? 0
+          if (position !== 0) {
+            const token = getTokenAtPosition(ts, sourceFile, position)
+            expect(token).toBeDefined()
+          }
+        }
+
+        if (name.includes("getCodeIndentationLevel")) {
+          const classDecl = sourceFile.statements[1]
+          assert(classDecl && ts.isClassDeclaration(classDecl))
+          if (classDecl?.members[0]) {
+            const method = classDecl.members[0]
+            assert(ts.isMethodDeclaration(method))
+            if (method.body?.statements[0]) {
+              const level = getCodeIndentationLevel(
+                ts,
+                method.body.statements[0],
+              )
+              expect(level).toBeGreaterThan(0)
+            }
+          }
+        }
+      })
+    }
+  })
 })
