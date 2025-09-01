@@ -31,3 +31,6 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.temp
+
+# Source maps (not needed for production)
+lib/**/*.map
