@@ -1,0 +1,33 @@
+# Source files
+src/
+*.test.ts
+*.test.js
+
+# Development and build config
+tsconfig.json
+tsconfig.build.json
+vitest.config.ts
+eslint.config.ts
+.prettierrc
+
+# CI/CD
+.github/
+.claude/
+
+# Coverage and test artifacts
+coverage/
+.nyc_output/
+test-results/
+
+# Development files
+*.log
+.DS_Store
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+
+# Temporary files
+*.tmp
+*.temp

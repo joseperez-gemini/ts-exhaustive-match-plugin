@@ -5,6 +5,7 @@
   "main": "lib/index.js",
   "scripts": {
     "format": "prettier . --write --list-different",
+    "format:check": "prettier . --write --check",
     "build": "tsc -p tsconfig.build.json",
     "watch": "tsc -w",
     "lint": "eslint",

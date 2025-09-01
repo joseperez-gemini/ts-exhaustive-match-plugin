@@ -8,6 +8,7 @@ export default defineConfig({
     exclude: ["**/node_modules/**"],
     coverage: {
       provider: "v8",
+      reporter: ["text", "lcov", "html"],
       include: ["src/**/*.ts"],
       exclude: ["./src/index.ts", "./src/utils.ts"],
       thresholds: {
