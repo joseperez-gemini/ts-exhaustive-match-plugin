@@ -7,7 +7,7 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.0+-blue.svg)](https://www.typescriptlang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-A TypeScript Language Service Plugin that generates exhaustive pattern matching for discriminated union types with zero dependencies.
+A TypeScript Language Service Plugin that generates exhaustive pattern matching for discriminated union types and string literal unions with zero dependencies.
 
 ## Features
 
@@ -29,13 +29,44 @@ A TypeScript Language Service Plugin that generates exhaustive pattern matching 
 
 🏷️ **Smart Discriminant Detection**: Automatically detects `tag` property as discriminant (configurable in future versions)
 
-## Supported Contexts
+## Supported Union Types
 
-The plugin generates exhaustive matches for discriminated union types in these contexts:
+### Discriminated Unions
 
 ```typescript
-type Result = { tag: "success"; data: string } | { tag: "error"; message: string }
+type Result =
+  | { tag: "success"; data: string }
+  | { tag: "error"; message: string }
 
+const result: Result = getResult()
+// These cases will get generated:
+if (result.tag === "success") {
+} else if (result.tag === "error") {
+} else {
+  result satisfies never
+}
+```
+
+### String Literal Unions
+
+```typescript
+type Status = "loading" | "success" | "error"
+
+const status: Status = getStatus()
+// These cases will get generated:
+if (status === "loading") {
+} else if (status === "success") {
+} else if (status === "error") {
+} else {
+  status satisfies never
+}
+```
+
+## Supported Contexts
+
+The plugin generates exhaustive matches in these contexts:
+
+```typescript
 // Function parameters
 function handle(result: Result) {
   // Cursor on 'result' → generates exhaustive match
@@ -49,7 +80,8 @@ const result: Result = getResult()
 result // Cursor here → generates exhaustive match
 
 // If statements with smart completion
-if (result. // Auto-completes with exhaustive match
+if (result. // Auto-completes with exhaustive match for discriminated unions
+if (status  // Auto-completes with exhaustive match for string literal unions
 ```
 
 ## Installation
@@ -129,7 +161,6 @@ function handleResponse(response: ApiResponse) {
 ## Future Enhancements
 
 - Configurable discriminant property names
-- Support for literal union types
 - Quick fixes for incomplete pattern matches
 
 ## Contributing
