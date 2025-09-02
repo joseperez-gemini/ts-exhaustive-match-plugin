@@ -104,6 +104,24 @@ if (x.tag === "a") {
       `,
     },
     {
+      name: "should work with string literal unions",
+      input: `
+type Test = "a" | "b";
+const /*cursor*/x: Test = "" as Test;
+      `,
+      output: `
+type Test = "a" | "b";
+const x: Test = "" as Test;
+if (x === "a") {
+  \\
+} else if (x === "b") {
+  \\
+} else {
+  x satisfies never;
+}
+      `,
+    },
+    {
       name: "should work with let variable declarations",
       input: `
 type Test = { tag: "a" } | { tag: "b" };
@@ -253,6 +271,26 @@ const x: Test = {} as Test;
 if (x.tag === "b") {
   \\
 } else if (x.tag === "a") {
+  \\
+} else {
+  x satisfies never;
+}
+      `,
+    },
+    {
+      name: "should preserve order for plain string literal unions",
+      input: `
+type Test = "c" | "a" | "b";
+const /*cursor*/x: Test = "" as Test;
+      `,
+      output: `
+type Test = "c" | "a" | "b";
+const x: Test = "" as Test;
+if (x === "c") {
+  \\
+} else if (x === "a") {
+  \\
+} else if (x === "b") {
   \\
 } else {
   x satisfies never;
@@ -508,6 +546,13 @@ type Test = { tag: "a" } | { tag: "b" };
 function handleTest(/*cursor*/x: Test)
       `,
     },
+    {
+      name: "should not work with single string literal",
+      input: `
+type Test = "single";
+const /*cursor*/x: Test = "" as Test;
+      `,
+    },
   ]
 
   for (const { name, input } of REFACTOR_NEGATIVE_TEST_CASES) {
@@ -610,6 +655,34 @@ const x: Test = {} as Test;
 if (x.tag === "a") {
   \\
 } else if (x.tag === "b") {
+  \\
+} else {
+  x satisfies never;
+}
+      `,
+    },
+    {
+      name: "should provide exhaustive match for plain string literal union",
+      input: `
+type Test = "a" | "b"
+const x: Test = "" as Test
+x/*cursor*/
+      `,
+      completion: `
+if (x === "a") {
+  \${1}
+} else if (x === "b") {
+  \${2}
+} else {
+  x satisfies never;
+}
+      `,
+      output: `
+type Test = "a" | "b"
+const x: Test = "" as Test
+if (x === "a") {
+  \\
+} else if (x === "b") {
   \\
 } else {
   x satisfies never;
@@ -777,6 +850,22 @@ type Test = { tag: "a" } | { tag: "b" }/*cursor*/
 type Test = { tag: "a" } | { tag: "b" };
 const x = { y: {} as Test };
 (x.y)./*cursor*/
+      `,
+    },
+    {
+      name: "should not provide exhaustive match completion for single string literal",
+      input: `
+type Test = "single";
+const x: Test = "" as Test;
+x/*cursor*/
+      `,
+    },
+    {
+      name: "should not provide exhaustive match completion for property access on string literal union",
+      input: `
+type Test = "a" | "b";
+const x: Test = "" as Test;
+x./*cursor*/
       `,
     },
   ]

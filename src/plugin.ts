@@ -126,14 +126,28 @@ export function init(modules: { typescript: TS }): ts.server.PluginModule {
         refactorCase.identifier,
       )
       assert(discriminatedUnionContext !== undefined)
-      const { targetUnion } = discriminatedUnionContext
+      const { targetUnion, targetSymbol } = discriminatedUnionContext
 
-      const ast = createExhaustiveMatchAST(
-        typescript,
-        refactorCase.identifier.text,
-        targetUnion.discriminant,
-        [...targetUnion.alternatives],
-      )
+      const compare = ((): ExhaustiveMatchLeftCompare => {
+        if (targetUnion.tag === "discriminated") {
+          return {
+            tag: "prop-access",
+            variableName: targetSymbol.name,
+            discriminantProperty: targetUnion.discriminant,
+          }
+        } else if (targetUnion.tag === "literal-union") {
+          return {
+            tag: "identifier",
+            variableName: targetSymbol.name,
+          }
+          /* v8 ignore next 3 -- @preserve */
+        } else {
+          return targetUnion satisfies never
+        }
+      })()
+      const ast = createExhaustiveMatchAST(typescript, compare, [
+        ...targetUnion.alternatives,
+      ])
 
       let newText = printASTWithPlaceholderReplacement(
         typescript,
@@ -229,20 +243,42 @@ export function init(modules: { typescript: TS }): ts.server.PluginModule {
 
       // Bail out when prop access is not a prefix of the discriminant
       if (
+        targetUnion.tag === "discriminated" &&
         comp.sub.tag === "propAccess" &&
         !targetUnion.discriminant.startsWith(comp.sub.node.name.text)
       ) {
         return prior
       }
 
-      // TODO: We should use the expression itself, not only its symbol name
-      // which only works for identifiers
-      const ast = createExhaustiveMatchAST(
-        typescript,
-        targetSymbol.name,
-        targetUnion.discriminant,
-        [...targetUnion.alternatives],
-      )
+      // Bail out when trying to access properties on string literal unions
+      if (
+        targetUnion.tag === "literal-union" &&
+        comp.sub.tag === "propAccess"
+      ) {
+        return prior
+      }
+
+      const compare = ((): ExhaustiveMatchLeftCompare => {
+        if (targetUnion.tag === "discriminated") {
+          return {
+            tag: "prop-access",
+            variableName: targetSymbol.name,
+            discriminantProperty: targetUnion.discriminant,
+          }
+        } else if (targetUnion.tag === "literal-union") {
+          return {
+            tag: "identifier",
+            variableName: targetSymbol.name,
+          }
+          /* v8 ignore next 3 */
+        } else {
+          return targetUnion satisfies never
+        }
+      })()
+
+      const ast = createExhaustiveMatchAST(typescript, compare, [
+        ...targetUnion.alternatives,
+      ])
 
       let snippetText = printASTWithPlaceholderReplacement(
         typescript,
@@ -271,8 +307,18 @@ export function init(modules: { typescript: TS }): ts.server.PluginModule {
         snippetText += "\n"
       }
 
+      const completionName = ((): string => {
+        if (targetUnion.tag === "discriminated") {
+          return `${targetSymbol.name}.${targetUnion.discriminant} (exhaustive match)`
+        } else if (targetUnion.tag === "literal-union") {
+          return `${targetSymbol.name} (exhaustive match)`
+          /* v8 ignore next 3 */
+        } else {
+          return targetUnion satisfies never
+        }
+      })()
       const customCompletion = {
-        name: `${targetSymbol.name}.${targetUnion.discriminant} (exhaustive match)`,
+        name: completionName,
         kind: typescript.ScriptElementKind.unknown,
         kindModifiers: "",
         sortText: "0", // High priority
@@ -497,7 +543,6 @@ function getExhaustiveCaseGenerationContext(
     typescript,
     typeChecker,
     declarationType,
-    { preserveSourceOrder: true },
   )
   assert(declarationUnion !== undefined)
 
@@ -511,7 +556,7 @@ function getExhaustiveCaseGenerationContext(
     targetUnion: {
       ...targetUnion,
       alternatives: new Set(sortedCases),
-    } satisfies DiscriminatedUnionInfo,
+    } satisfies UnionInfo,
   }
 }
 
@@ -530,57 +575,78 @@ function isStringLiteral(
   return (type.flags & typescript.TypeFlags.StringLiteral) !== 0
 }
 
-type DiscriminatedUnionInfo = {
-  discriminant: "tag"
-  alternatives: Set<string>
-}
+type UnionInfo =
+  | {
+      tag: "discriminated"
+      discriminant: "tag"
+      alternatives: Set<string>
+    }
+  | {
+      tag: "literal-union"
+      alternatives: Set<string>
+    }
+
 function getDiscriminatedUnionFromType(
   typescript: TS,
   typeChecker: ts.TypeChecker,
   type: ts.Type,
-  options?: { preserveSourceOrder?: boolean },
-): DiscriminatedUnionInfo | undefined {
-  const { preserveSourceOrder = false } = options ?? {}
+): UnionInfo | undefined {
   if (!isUnionType(typescript, type)) return
 
-  const alternativesWithPositions: { value: string; position: number }[] = []
+  const isObjectsUnion = type.types.every((t) => isObjectType(typescript, t))
 
-  // TODO: Auto-detect discriminant name
-  for (const subtype of type.types) {
-    if (!isObjectType(typescript, subtype)) return
-    let foundDiscriminant = false
-    for (const prop of typeChecker.getPropertiesOfType(subtype)) {
-      if (prop.name !== "tag") continue
-      const propType = typeChecker.getTypeOfSymbol(prop)
-      if (!isStringLiteral(typescript, propType)) return
+  if (isObjectsUnion) {
+    const alternativesWithPositions: { value: string; position: number }[] = []
 
-      // Get source position if needed for ordering
-      let position = 0
-      if (preserveSourceOrder && prop.valueDeclaration) {
-        position = prop.valueDeclaration.getStart()
+    // TODO: Auto-detect discriminant name
+    for (const subtype of type.types) {
+      assert(isObjectType(typescript, subtype))
+      let foundDiscriminant = false
+      for (const prop of typeChecker.getPropertiesOfType(subtype)) {
+        if (prop.name !== "tag") continue
+        const propType = typeChecker.getTypeOfSymbol(prop)
+        if (!isStringLiteral(typescript, propType)) return
+
+        const position = prop.valueDeclaration?.getStart()
+        assert(position !== undefined)
+        alternativesWithPositions.push({
+          value: propType.value,
+          // Get source position if possible for ordering
+          position,
+        })
+        foundDiscriminant = true
       }
-
-      alternativesWithPositions.push({
-        value: propType.value,
-        position,
-      })
-      foundDiscriminant = true
+      if (!foundDiscriminant) return
     }
-    if (!foundDiscriminant) return
-  }
-
-  // Sort by source position if requested
-  if (preserveSourceOrder) {
     alternativesWithPositions.sort((a, b) => a.position - b.position)
+    // Convert to Set maintaining order
+    const alternatives = new Set(alternativesWithPositions.map((a) => a.value))
+
+    return {
+      tag: "discriminated",
+      discriminant: "tag",
+      alternatives,
+    }
   }
 
-  // Convert to Set maintaining order
-  const alternatives = new Set(alternativesWithPositions.map((a) => a.value))
+  // Check if all types are string literals
+  const isStringLiteralUnion = type.types.every((t) =>
+    isStringLiteral(typescript, t),
+  )
 
-  return {
-    discriminant: "tag",
-    alternatives,
+  if (isStringLiteralUnion) {
+    const alternatives: Set<string> = new Set()
+    for (const subtype of type.types) {
+      assert(isStringLiteral(typescript, subtype))
+      alternatives.add(subtype.value)
+    }
+    return {
+      tag: "literal-union",
+      alternatives,
+    }
   }
+
+  return undefined
 }
 
 function getSourceDeclarationType(
@@ -604,18 +670,30 @@ function getSourceDeclarationType(
   return declaredType
 }
 
+type ExhaustiveMatchLeftCompare =
+  | { tag: "prop-access"; variableName: string; discriminantProperty: string }
+  | { tag: "identifier"; variableName: string }
 function createExhaustiveMatchAST(
   typescript: TS,
-  variableName: string,
-  discriminantProperty: string,
+  expr: ExhaustiveMatchLeftCompare,
   cases: string[],
 ): ts.IfStatement {
+  function createLeftExpr() {
+    if (expr.tag === "prop-access") {
+      return typescript.factory.createPropertyAccessExpression(
+        typescript.factory.createIdentifier(expr.variableName),
+        expr.discriminantProperty,
+      )
+    } else if (expr.tag === "identifier") {
+      return typescript.factory.createIdentifier(expr.variableName)
+      /* v8 ignore next 3 */
+    } else {
+      return expr satisfies never
+    }
+  }
   function createCondition(tagValue: string) {
     return typescript.factory.createBinaryExpression(
-      typescript.factory.createPropertyAccessExpression(
-        typescript.factory.createIdentifier(variableName),
-        discriminantProperty,
-      ),
+      createLeftExpr(),
       typescript.SyntaxKind.EqualsEqualsEqualsToken,
       typescript.factory.createStringLiteral(tagValue),
     )
@@ -639,7 +717,7 @@ function createExhaustiveMatchAST(
       [
         typescript.factory.createExpressionStatement(
           typescript.factory.createSatisfiesExpression(
-            typescript.factory.createIdentifier(variableName),
+            typescript.factory.createIdentifier(expr.variableName),
             typescript.factory.createKeywordTypeNode(
               typescript.SyntaxKind.NeverKeyword,
             ),

@@ -12,7 +12,7 @@
     "compile": "tsc --noEmit",
     "test": "vitest run --coverage --silent=false --disable-console-intercept",
     "test:watch": "vitest",
-    "test:ui": "vitest --ui",
+    "test:ui": "vitest --ui --coverage --api.host 0.0.0.0",
     "check": "npm run format && npm run compile && npm run lint && npm run build && npm run test",
     "prepublishOnly": "rm -rf lib && npm run build"
   },
