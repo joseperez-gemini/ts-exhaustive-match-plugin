@@ -578,6 +578,16 @@ type Test = "single";
 const /*cursor*/x: Test = "" as Test;
       `,
     },
+    {
+      name: "should not work when type is already fully narrowed",
+      input: `
+type Test = { tag: "a" } | { tag: "b" };
+const x: Test = {} as Test;
+if (x.tag === "a") {
+  /*cursor*/x
+}
+      `,
+    },
   ]
 
   for (const { name, input } of REFACTOR_NEGATIVE_TEST_CASES) {
@@ -833,6 +843,16 @@ x.foo/*cursor*/
 type SimpleUnion = string | number;
 const x: SimpleUnion = {} as SimpleUnion;
 if (x/*cursor*/
+      `,
+    },
+    {
+      name: "should not provide completion for current case",
+      input: `
+type Test = { tag: "a" } | { tag: "b" };
+const x: Test = {} as Test;
+if (x.tag === "a") {
+  x.t/*cursor*/
+}
       `,
     },
     {

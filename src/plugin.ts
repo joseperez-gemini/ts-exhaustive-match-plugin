@@ -74,6 +74,12 @@ export function init(modules: { typescript: TS }): ts.server.PluginModule {
         refactorCase.identifier,
       )
       if (discriminatedUnionContext === undefined) return prior
+      const { targetUnion } = discriminatedUnionContext
+
+      // Don't offer refactor when type is already fully narrowed
+      if (targetUnion.alternatives.size === 1) {
+        return prior
+      }
 
       const refactor: ts.ApplicableRefactorInfo = {
         name: "Generate exhaustive match",
@@ -355,6 +361,11 @@ export function init(modules: { typescript: TS }): ts.server.PluginModule {
         targetUnion.tag === "literal-union" &&
         comp.sub.tag === "propAccess"
       ) {
+        return prior
+      }
+
+      // Bail out when there's only one alternative (type is already fully narrowed)
+      if (targetUnion.alternatives.size === 1) {
         return prior
       }
 
