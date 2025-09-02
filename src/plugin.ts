@@ -54,15 +54,18 @@ export function init(modules: { typescript: TS }): ts.server.PluginModule {
         triggerReason,
         kind,
       )
-      if (typeof positionOrRange !== "number") return prior
+      let position: number
+      if (typeof positionOrRange === "number") {
+        position = positionOrRange
+      } else if (positionOrRange.pos === positionOrRange.end) {
+        position = positionOrRange.pos
+      } else {
+        return prior
+      }
 
       const { sourceFile, typeChecker } = getLSContext(fileName)
 
-      const refactorCase = getRefactorCase(
-        typescript,
-        sourceFile,
-        positionOrRange,
-      )
+      const refactorCase = getRefactorCase(typescript, sourceFile, position)
       if (refactorCase === undefined) return prior
 
       const discriminatedUnionContext = getExhaustiveCaseGenerationContext(
@@ -94,28 +97,34 @@ export function init(modules: { typescript: TS }): ts.server.PluginModule {
       actionName,
       preferences,
     ) => {
+      const prior = info.languageService.getEditsForRefactor(
+        fileName,
+        formatOptions,
+        positionOrRange,
+        refactorName,
+        actionName,
+        preferences,
+      )
       /* v8 ignore start -- @preserve */
       // We don't care for refactors not involving this action
-      if (actionName !== "generateExhaustiveMatch") {
-        return info.languageService.getEditsForRefactor(
-          fileName,
-          formatOptions,
-          positionOrRange,
-          refactorName,
-          actionName,
-          preferences,
-        )
+      if (actionName !== "generateExhaustiveMatch") return prior
+      /* v8 ignore stop -- @preserve */
+
+      let position: number
+      if (typeof positionOrRange === "number") {
+        position = positionOrRange
+      } else if (positionOrRange.pos === positionOrRange.end) {
+        position = positionOrRange.pos
+        /* v8 ignore start -- @preserve */
+        // We validated above that we receive a number or a same range position
+      } else {
+        return prior
       }
       /* v8 ignore stop -- @preserve */
 
-      assert(typeof positionOrRange === "number")
       const { sourceFile, typeChecker } = getLSContext(fileName)
 
-      const refactorCase = getRefactorCase(
-        typescript,
-        sourceFile,
-        positionOrRange,
-      )
+      const refactorCase = getRefactorCase(typescript, sourceFile, position)
       assert(refactorCase !== undefined)
 
       const discriminatedUnionContext = getExhaustiveCaseGenerationContext(
@@ -217,6 +226,97 @@ export function init(modules: { typescript: TS }): ts.server.PluginModule {
           },
         ],
       }
+    }
+
+    proxy.getCodeFixesAtPosition = (
+      fileName,
+      start,
+      end,
+      errorCodes,
+      formatOptions,
+      preferences,
+    ) => {
+      const prior = info.languageService.getCodeFixesAtPosition(
+        fileName,
+        start,
+        end,
+        errorCodes,
+        formatOptions,
+        preferences,
+      )
+
+      const { sourceFile, typeChecker } = getLSContext(fileName)
+      const satisfiesNeverStructure = getSatisfiesNeverStructure(
+        typescript,
+        sourceFile,
+        start,
+      )
+      if (satisfiesNeverStructure === undefined) return prior
+      const { identifier, elseStatement } = satisfiesNeverStructure
+
+      const discriminatedUnionContext = getExhaustiveCaseGenerationContext(
+        typescript,
+        typeChecker,
+        identifier,
+      )
+      if (discriminatedUnionContext === undefined) return prior
+      const { targetUnion } = discriminatedUnionContext
+
+      // Generate the comparison logic
+      const compare = ((): ExhaustiveMatchLeftCompare => {
+        if (targetUnion.tag === "discriminated") {
+          return {
+            tag: "prop-access",
+            variableName: identifier.text,
+            discriminantProperty: targetUnion.discriminant,
+          }
+        } else if (targetUnion.tag === "literal-union") {
+          return {
+            tag: "identifier",
+            variableName: identifier.text,
+          }
+          /* v8 ignore next 3 */
+        } else {
+          return targetUnion satisfies never
+        }
+      })()
+
+      const ast = createExhaustiveMatchAST(typescript, compare, [
+        ...targetUnion.alternatives,
+      ])
+
+      const newText = printASTWithPlaceholderReplacement(
+        typescript,
+        sourceFile,
+        ast,
+        {
+          isSnippet: false,
+          allLinesIndent: getCodeIndentationLevel(typescript, elseStatement),
+        },
+      ).trimStart()
+
+      const insertionPoint = {
+        start: elseStatement.getStart(),
+        length: elseStatement.getEnd() - elseStatement.getStart(),
+      }
+
+      const quickFix: ts.CodeFixAction = {
+        fixName: "addMissingCases",
+        description: `Add missing cases: ${[...targetUnion.alternatives].join(", ")}`,
+        changes: [
+          {
+            fileName,
+            textChanges: [
+              {
+                span: insertionPoint,
+                newText,
+              },
+            ],
+          },
+        ],
+      }
+
+      return [...prior, quickFix]
     }
 
     proxy.getCompletionsAtPosition = (fileName, position, options) => {
@@ -526,6 +626,7 @@ function getExhaustiveCaseGenerationContext(
     typescript,
     typeChecker,
     narrowedTargetType,
+    true,
   )
   if (targetUnion === undefined) return undefined
 
@@ -537,12 +638,13 @@ function getExhaustiveCaseGenerationContext(
     targetSymbol,
     typeChecker,
   )
-  assert(declarationType !== undefined)
+  if (declarationType === undefined) return undefined
 
   const declarationUnion = getDiscriminatedUnionFromType(
     typescript,
     typeChecker,
     declarationType,
+    false,
   )
   assert(declarationUnion !== undefined)
 
@@ -590,7 +692,32 @@ function getDiscriminatedUnionFromType(
   typescript: TS,
   typeChecker: ts.TypeChecker,
   type: ts.Type,
+  allowSingleElementTypes = false,
 ): UnionInfo | undefined {
+  if (allowSingleElementTypes) {
+    // Allow single tag items
+    if (isObjectType(typescript, type)) {
+      const tagProp = type.getProperty("tag")
+      if (tagProp === undefined) return undefined
+
+      const propType = typeChecker.getTypeOfSymbol(tagProp)
+      if (!isStringLiteral(typescript, propType)) return undefined
+
+      return {
+        tag: "discriminated",
+        discriminant: "tag",
+        alternatives: new Set([propType.value]),
+      }
+    }
+    // Or single literals
+    if (isStringLiteral(typescript, type)) {
+      return {
+        tag: "literal-union",
+        alternatives: new Set([type.value]),
+      }
+    }
+  }
+
   if (!isUnionType(typescript, type)) return
 
   const isObjectsUnion = type.types.every((t) => isObjectType(typescript, t))
@@ -900,4 +1027,85 @@ export function getTokenAtPosition(
       return getTokenAtPosition(typescript, child, position)
     }) ?? node
   )
+}
+
+function findAncestorMatching<T extends ts.Node>(
+  descendant: ts.Node,
+  pred: (node: ts.Node) => node is T,
+  proper?: boolean,
+): T | undefined
+function findAncestorMatching(
+  descendant: ts.Node,
+  pred: (node: ts.Node) => boolean,
+  proper?: boolean,
+): ts.Node | undefined
+function findAncestorMatching(
+  descendant: ts.Node,
+  pred: (node: ts.Node) => boolean,
+  proper: boolean | undefined = true,
+): ts.Node | undefined {
+  let current = proper === true ? descendant.parent : descendant
+  while (current !== undefined) {
+    if (pred(current)) {
+      return current
+    }
+    current = current.parent
+  }
+  return undefined
+}
+
+function isAncestor(
+  possibleAncestor: ts.Node,
+  descendant: ts.Node,
+  proper = true,
+): boolean {
+  return (
+    findAncestorMatching(
+      descendant,
+      (node) => node === possibleAncestor,
+      proper,
+    ) !== undefined
+  )
+}
+
+type SatisfiesNeverStructure = {
+  identifier: ts.Identifier
+  elseStatement: ts.Statement
+}
+function getSatisfiesNeverStructure(
+  typescript: TS,
+  sourceFile: ts.SourceFile,
+  position: number,
+): SatisfiesNeverStructure | undefined {
+  const node = getTokenAtPosition(typescript, sourceFile, position)
+  assert(node !== undefined)
+
+  const satisfiesExpr = findAncestorMatching(
+    node,
+    typescript.isSatisfiesExpression,
+    false,
+  )
+  if (satisfiesExpr === undefined) return undefined
+
+  const identifier = satisfiesExpr.expression
+  if (!typescript.isIdentifier(identifier)) return undefined
+
+  const ifStatement = findAncestorMatching(
+    satisfiesExpr,
+    typescript.isIfStatement,
+  )
+  if (ifStatement === undefined) return undefined
+
+  const elseStatement = ifStatement.elseStatement
+  if (
+    elseStatement === undefined ||
+    !isAncestor(elseStatement, satisfiesExpr)
+  ) {
+    return undefined
+  }
+
+  return {
+    identifier,
+    elseStatement,
+  }
 }

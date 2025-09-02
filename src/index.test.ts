@@ -5,13 +5,18 @@ import {
   init,
 } from "./plugin"
 
+import { setSkipTSLogger } from "./utils"
 import assert from "assert"
 import ts from "typescript"
-import { describe, expect, it } from "vitest"
+import { beforeEach, describe, expect, it } from "vitest"
 
 const TEST_FILE_NAME = "test.ts"
 
 describe("TypeScript Exhaustive Match Plugin", () => {
+  beforeEach(() => {
+    setSkipTSLogger(true)
+  })
+
   function createLanguageService(code: string): ts.LanguageService {
     const plugin = init({ typescript: ts })
     const files: Map<string, string> = new Map()
@@ -302,6 +307,26 @@ if (x === "c") {
       input: `
 type Test = { tag: "a" } | { tag: "b" };
 function handleTest(/*cursor*/x: Test) {
+}
+      `,
+      output: `
+type Test = { tag: "a" } | { tag: "b" };
+function handleTest(x: Test) {
+  if (x.tag === "a") {
+    \\
+  } else if (x.tag === "b") {
+    \\
+  } else {
+    x satisfies never;
+  }
+}
+      `,
+    },
+    {
+      name: "should work with cursor range with same start and end",
+      input: `
+type Test = { tag: "a" } | { tag: "b" };
+function handleTest(/*cursor pos*//*cursor end*/x: Test) {
 }
       `,
       output: `
@@ -1009,6 +1034,329 @@ if (x.tag !== "c") {
       expect(exhaustiveCompletion).toBeUndefined()
     })
   }
+
+  describe("quick fix for incomplete pattern matches", () => {
+    const QUICK_FIX_POSITIVE_CASES = [
+      {
+        name: "should offer quick fix for incomplete discriminated union",
+        input: `
+type Test = { tag: "a" } | { tag: "b" } | { tag: "c" };
+const x: Test = {} as Test;
+if (x.tag === "a") {
+  \\
+} else {
+  x /*cursor*/satisfies never;
+}
+        `,
+        expectedDescription: "Add missing cases: b, c",
+        expectedOutput: `
+type Test = { tag: "a" } | { tag: "b" } | { tag: "c" };
+const x: Test = {} as Test;
+if (x.tag === "a") {
+  \\
+} else if (x.tag === "b") {
+  \\
+} else if (x.tag === "c") {
+  \\
+} else {
+  x satisfies never;
+}
+        `,
+      },
+      {
+        name: "should offer quick fix for incomplete string literal union",
+        input: `
+type Test = "a" | "b" | "c";
+const x: Test = "" as Test;
+if (x === "a") {
+  \\
+} else {
+  x /*cursor*/satisfies never;
+}
+        `,
+        expectedDescription: "Add missing cases: b, c",
+        expectedOutput: `
+type Test = "a" | "b" | "c";
+const x: Test = "" as Test;
+if (x === "a") {
+  \\
+} else if (x === "b") {
+  \\
+} else if (x === "c") {
+  \\
+} else {
+  x satisfies never;
+}
+        `,
+      },
+      {
+        name: "should offer quick fix for single missing case",
+        input: `
+type Test = { tag: "a" } | { tag: "b" } | { tag: "c" };
+const x: Test = {} as Test;
+if (x.tag === "a") {
+  \\
+} else if (x.tag === "b") {
+  \\
+} else {
+  x /*cursor*/satisfies never;
+}
+        `,
+        expectedDescription: "Add missing cases: c",
+        expectedOutput: `
+type Test = { tag: "a" } | { tag: "b" } | { tag: "c" };
+const x: Test = {} as Test;
+if (x.tag === "a") {
+  \\
+} else if (x.tag === "b") {
+  \\
+} else if (x.tag === "c") {
+  \\
+} else {
+  x satisfies never;
+}
+        `,
+      },
+      {
+        name: "should handle indents correctly",
+        input: `
+type Test = { tag: "a" } | { tag: "b" } | { tag: "c" };
+const x: Test = {} as Test;
+if (x.tag !== "a") {
+  if (x.tag === "b") {
+    \\
+  } else {
+    x satisfies/*cursor*/ never;
+  }
+}
+        `,
+        expectedDescription: "Add missing cases: c",
+        expectedOutput: `
+type Test = { tag: "a" } | { tag: "b" } | { tag: "c" };
+const x: Test = {} as Test;
+if (x.tag !== "a") {
+  if (x.tag === "b") {
+    \\
+  } else if (x.tag === "c") {
+    \\
+  } else {
+    x satisfies never;
+  }
+}
+        `,
+      },
+      {
+        name: "should offer quick fix for single missing string literal case",
+        input: `
+type Test = "a" | "b" | "c";
+const x: Test = "" as Test;
+if (x === "a") {
+  \\
+} else if (x === "b") {
+  \\
+} else {
+  x /*cursor*/satisfies never;
+}
+        `,
+        expectedDescription: "Add missing cases: c",
+        expectedOutput: `
+type Test = "a" | "b" | "c";
+const x: Test = "" as Test;
+if (x === "a") {
+  \\
+} else if (x === "b") {
+  \\
+} else if (x === "c") {
+  \\
+} else {
+  x satisfies never;
+}
+        `,
+      },
+    ]
+
+    for (const {
+      name,
+      input,
+      expectedDescription,
+      expectedOutput,
+    } of QUICK_FIX_POSITIVE_CASES) {
+      it(name, () => {
+        const [inputCode, cursorPosition] = processInput(input)
+        const enhancedService = createLanguageService(inputCode)
+
+        const startPos =
+          typeof cursorPosition === "number"
+            ? cursorPosition
+            : cursorPosition.pos
+        const endPos =
+          typeof cursorPosition === "number"
+            ? cursorPosition
+            : cursorPosition.end
+
+        const codeFixes = enhancedService.getCodeFixesAtPosition(
+          TEST_FILE_NAME,
+          startPos,
+          endPos,
+          [],
+          {},
+          {},
+        )
+
+        expect(codeFixes).toHaveLength(1)
+        expect(codeFixes[0]?.fixName).toBe("addMissingCases")
+        expect(codeFixes[0]?.description).toBe(expectedDescription)
+
+        const quickFix = codeFixes[0]
+        expect(quickFix?.changes).toHaveLength(1)
+
+        const change = quickFix?.changes[0]
+        expect(change?.fileName).toBe(TEST_FILE_NAME)
+        expect(change?.textChanges).toHaveLength(1)
+
+        const textChange = change?.textChanges[0]
+        assert(textChange !== undefined)
+
+        // Apply the text change to verify the full result
+        const actualResult =
+          inputCode.slice(0, textChange.span.start) +
+          textChange.newText +
+          inputCode.slice(textChange.span.start + textChange.span.length)
+
+        const expectedCode = expectedOutput.trim().replace(/ \\\n/g, " \n")
+        const actualCode = actualResult.trim().replace(/ \\\n/g, " \n")
+        expect(actualCode).toBe(expectedCode)
+      })
+    }
+
+    const QUICK_FIX_NEGATIVE_CASES = [
+      {
+        name: "should not offer quick fix for complete discriminated union",
+        input: `
+type Test = { tag: "a" } | { tag: "b" } | { tag: "c" };
+const x: Test = {} as Test;
+if (x.tag === "a") {
+  \\
+} else if (x.tag === "b") {
+  \\
+} else if (x.tag === "c") {
+  \\
+} else {
+  x /*cursor*/satisfies never;
+}
+        `,
+      },
+      {
+        name: "should not offer quick fix for complete string literal union",
+        input: `
+type Test = "a" | "b" | "c";
+const x: Test = "" as Test;
+if (x === "a") {
+  \\
+} else if (x === "b") {
+  \\
+} else if (x === "c") {
+  \\
+} else {
+  x /*cursor*/satisfies never;
+}
+        `,
+      },
+      {
+        name: "should not offer quick fix for non-union type",
+        input: `
+type Simple = { name: string };
+const simple: Simple = {} as Simple;
+simple /*cursor*/satisfies never;
+        `,
+      },
+      {
+        name: "should not offer quick fix outside satisfies never context",
+        input: `
+type Test = { tag: "a" } | { tag: "b" };
+const /*cursor*/x: Test = {} as Test;
+        `,
+      },
+      {
+        name: "should not offer quick fix for non-string literal tag type",
+        input: `
+type Test = { tag: 0 } | { tag: 1 };
+const result: Test = {} as Test;
+if (result.tag === 0) {
+  \\
+} else {
+  result /*cursor*/satisfies never;
+}
+        `,
+      },
+      {
+        name: "should not offer quick fix for non-object non-string-literal types",
+        input: `
+type Test = number | boolean;
+const result: Test = 0;
+if (typeof result === "number") {
+  \\
+} else {
+  result /*cursor*/satisfies never;
+}
+        `,
+      },
+      {
+        name: "should not offer quick fix for invalid satisfies never",
+        input: `
+type Test = number | boolean;
+const result: Test = 0;
+if (typeof result === "number") {
+  \\
+} else {
+  false/*cursor*/ satisfies never;
+}
+        `,
+      },
+      {
+        name: "should not offer quick fix for satisfies never outside the else case",
+        input: `
+type Test = number | boolean;
+const result: Test = 0;
+if (typeof result === "number") {
+  result/*cursor*/ satisfies never;
+} else {
+  \\
+}
+        `,
+      },
+    ]
+
+    for (const { name, input } of QUICK_FIX_NEGATIVE_CASES) {
+      it(name, () => {
+        const [inputCode, cursorPosition] = processInput(input)
+        const enhancedService = createLanguageService(inputCode)
+
+        const startPos =
+          typeof cursorPosition === "number"
+            ? cursorPosition
+            : cursorPosition.pos
+        const endPos =
+          typeof cursorPosition === "number"
+            ? cursorPosition
+            : cursorPosition.end
+
+        const codeFixes = enhancedService.getCodeFixesAtPosition(
+          TEST_FILE_NAME,
+          startPos,
+          endPos,
+          [],
+          {},
+          {},
+        )
+
+        const quickFixActions = codeFixes.filter(
+          (fix) => fix.fixName === "addMissingCases",
+        )
+        expect(quickFixActions).toHaveLength(0)
+      })
+    }
+  })
 
   // Tests for plugin utility functions
   describe("plugin utility functions", () => {

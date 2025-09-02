@@ -17,6 +17,7 @@ A TypeScript Language Service Plugin that generates exhaustive pattern matching 
 
 - **Refactoring**: Right-click on identifiers to generate exhaustive matches
 - **Auto-completion**: Type-ahead support for discriminated union identifiers and property access
+- **Quick Fix**: Add missing cases to incomplete pattern matches with a single click
 - **IntelliSense**: Works seamlessly in VS Code, WebStorm, and other TypeScript-enabled editors
 
 🔧 **Comprehensive Support**:
@@ -122,6 +123,26 @@ Add the plugin to your `tsconfig.json`:
 2. Select the exhaustive match completion from the suggestion list
 3. Tab through the generated placeholder blocks
 
+### Via Quick Fix
+
+When you have an incomplete pattern match:
+
+```typescript
+type Status = "idle" | "pending" | "done"
+const status: Status = getStatus()
+
+if (status === "idle") {
+  // Handle idle
+} else {
+  status satisfies never // TypeScript error: Type '"pending" | "done"' does not satisfy 'never'
+}
+```
+
+1. Place your cursor on the `satisfies never` expression
+2. Use the quick fix shortcut (Cmd+. on Mac, Ctrl+. on Windows/Linux)
+3. Select "Add missing cases: pending, done"
+4. The plugin will automatically add the missing cases
+
 ### Generated Output
 
 For a discriminated union like:
@@ -161,7 +182,6 @@ function handleResponse(response: ApiResponse) {
 ## Future Enhancements
 
 - Configurable discriminant property names
-- Quick fixes for incomplete pattern matches
 
 ## Contributing
 

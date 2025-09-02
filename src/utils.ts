@@ -3,21 +3,18 @@ import type * as ts from "typescript/lib/tsserverlibrary"
 
 type TS = typeof ts
 
-const DEBUG: "console" | "ts-logger" | undefined = "console"
-
-let logger: (...args: unknown[]) => void =
-  DEBUG === "console"
-    ? console.log
-    : () => {
-        /* Do nothing, if it is ts-logger then it will be replaced later */
-      }
-
+let logger: (...args: unknown[]) => void = console.log
 export function log(...args: unknown[]) {
   logger(...args)
 }
 
+let skipTSLogger = false
+export function setSkipTSLogger(skip: boolean) {
+  skipTSLogger = skip
+}
+
 export function setTSLogger(newLogger: typeof logger) {
-  if (DEBUG === "ts-logger") {
+  if (!skipTSLogger) {
     logger = newLogger
   }
 }
